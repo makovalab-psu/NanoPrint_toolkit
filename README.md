@@ -2,7 +2,9 @@
 
 # Overview
 
-NanoPrint_toolkit is a Snakemake-based pipeline for analyzing permanganate chemical footprinting data from long-read (Oxford Nanopore) sequencing. The pipeline processes raw sequencing reads through alignment, per-base error quantification, reactivity calculation (treatment minus control), and downstream analyses including significance-filtered bigWig generation, reactive nucleotide density calculations, and feature annotation. The workflow is optimized for parallelization through chromosome-level splitting of data.
+NanoPrint_toolkit is a Snakemake-based pipeline for analyzing chemical footprinting data from long-read (Oxford Nanopore) sequencing. The pipeline processes raw sequencing reads through alignment, per-base error quantification, reactivity calculation (treatment minus control), and downstream analyses including significance-filtered bigWig generation, reactive nucleotide density calculations, and feature annotation. The workflow is optimized for parallelization through chromosome-level splitting of data.
+
+However, the toolkit is composed of a series of scripts found. Thus, a user can use the pipeline as intended with snakemake, or use individal scripts as documented below.
 
 # Pipeline
 
