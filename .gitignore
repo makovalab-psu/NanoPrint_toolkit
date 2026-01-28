@@ -1,0 +1,24 @@
+# macOS
+.DS_Store
+
+# R
+.RData
+.Rhistory
+*.Rproj.user/
+
+# Data directories (large files)
+data/
+raw_data/
+resources/
+
+# Test files
+test/
+test_*.txt
+
+# Claude/IDE
+.claude/
+claude/
+
+# Temporary files
+*.tmp
+tmp_*/
