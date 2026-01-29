@@ -44,7 +44,8 @@ Your CONFIG file should look something like this:
 ^g	test_genome.fa
 
 #Features to annotate, place in resources/features/
-^f	g4Discovery.bed
+#^f	bed file	n_windows	window_size
+^f	g4Discovery.bed	1000	10
 
 # Window size
 ^w	1000000
@@ -60,7 +61,7 @@ Your CONFIG file should look something like this:
 The wildcard variables are assigned designated as:
 
 ^g The genome you want to map to
-^f Any features that you want to annotate
+^f Features to annotate with optional parameters: bed_file, n_windows (default: 1000), window_size (default: 10)
 ^w The window files you want in the windows bed files
 ^s The significance threshold for identifying reactive nucleotides
 ^r The relationship between sequencing reads

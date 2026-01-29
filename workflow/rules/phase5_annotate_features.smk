@@ -57,8 +57,8 @@ rule annotate_features:
     output:
         annotation="data/annotations/{genome}/{feature}/{sample}_{strand}_{chr}.txt.gz"
     params:
-        n_windows=config.get("annotate_n_windows", 1000),
-        window_size=config.get("annotate_window_size", 10)
+        n_windows=lambda wildcards: FEATURE_PARAMS.get(wildcards.feature, (1000, 10))[0],
+        window_size=lambda wildcards: FEATURE_PARAMS.get(wildcards.feature, (1000, 10))[1]
     log:
         "logs/annotate_features/{genome}/{feature}/{sample}_{strand}_{chr}.log"
     wildcard_constraints:

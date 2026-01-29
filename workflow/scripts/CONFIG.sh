@@ -43,6 +43,8 @@ fi
 # Initialize arrays
 declare -a GENOMES=()
 declare -a FEATURES=()
+declare -a FEATURE_N_WINDOWS=()
+declare -a FEATURE_WINDOW_SIZES=()
 declare -a WINDOW_SIZES=()
 declare -a SIG_LEVELS=()
 declare -a SAMPLES=()
@@ -88,10 +90,17 @@ while IFS= read -r line || [[ -n "$line" ]]; do
                 GENOMES+=("$value")
                 ;;
             "^f")
-                # Feature - strip extension
+                # Feature - strip extension, get n_windows and window_size
                 value=$(echo "$values" | cut -f1)
                 value=$(strip_ext "$value")
+                n_windows=$(echo "$values" | cut -f2 | tr -d ' ')
+                window_size=$(echo "$values" | cut -f3 | tr -d ' ')
+                # Use defaults if not specified
+                [[ -z "$n_windows" ]] && n_windows="1000"
+                [[ -z "$window_size" ]] && window_size="10"
                 FEATURES+=("$value")
+                FEATURE_N_WINDOWS+=("$n_windows")
+                FEATURE_WINDOW_SIZES+=("$window_size")
                 ;;
             "^w")
                 # Window size
@@ -170,6 +179,13 @@ EOF
     echo ""
     echo "# Features for annotation"
     echo "FEATURES = $(python_list "${FEATURES[@]}")"
+    echo ""
+    echo "# Feature annotation parameters: feature -> (n_windows, window_size)"
+    echo "FEATURE_PARAMS = {"
+    for i in "${!FEATURES[@]}"; do
+        echo "    \"${FEATURES[$i]}\": (${FEATURE_N_WINDOWS[$i]}, ${FEATURE_WINDOW_SIZES[$i]}),"
+    done
+    echo "}"
     echo ""
     echo "# Window sizes for density calculation"
     echo "WINDOW_SIZES = $(python_list "${WINDOW_SIZES[@]}")"
