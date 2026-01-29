@@ -24,6 +24,69 @@ conda activate nanoprint
 | Languages | python (>=3.8), R |
 | R packages | ggplot2, dplyr |
 
+# Instructions
+
+## 1. Organize data
+
+Make directories for inputs
+
+```bash
+mkdir -p resources/genomes resources/features raw_data
+```
+Then add the relevant files in to the correct directory.
+
+## 2. Edit CONFIG file
+
+Your CONFIG file should look something like this:
+
+```
+#Genomes, place in resources/genomes/
+^g	test_genome.fa
+
+#Features to annotate, place in resources/features/
+^f	g4Discovery.bed
+
+# Window size
+^w	1000000
+^w	10000
+
+#Significance threshold level, 1 is p <= 0.05,  2 is p <= 0.01,  3 is p <= 0.001,  4 is p <= 0.0001.
+^s	2 
+
+#Relationships between files
+#^    Sample          Treatment                 Control
+^r	   Hsap_HG002_LCL		Hsap_HG002_LCL_Mn04.bam	  Hsap_HG002_LCL_CTRL.bam
+```
+The wildcard variables are assigned designated as:
+
+^g The genome you want to map to
+^f Any features that you want to annotate
+^w The window files you want in the windows bed files
+^s The significance threshold for identifying reactive nucleotides
+^r The relationship between sequencing reads
+
+If you want to try out alternative variables, just add another row.
+
+## 3. Generate Snakefile
+
+```bash
+./workflow/scripts/CONFIG.sh
+```
+
+## 4. Visualize the workflow to check the Snakefile
+
+```bash
+snakemake --dag | dot -Tpdf > dag.pdf
+```
+
+## 5. Run the pipeline
+
+Direct execution with Snakmake
+
+```bash
+snakemake --cores 4
+```
+
 # Pipeline
 
 ```
