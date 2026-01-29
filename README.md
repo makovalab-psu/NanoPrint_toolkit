@@ -4,7 +4,7 @@
 
 NanoPrint_toolkit is a Snakemake-based pipeline for analyzing chemical footprinting data from long-read (Oxford Nanopore) sequencing. The pipeline processes raw sequencing reads through alignment, per-base error quantification, reactivity calculation (treatment minus control), and downstream analyses including significance-filtered bigWig generation, reactive nucleotide density calculations, and feature annotation. The workflow is optimized for parallelization through chromosome-level splitting of data.
 
-However, the toolkit is composed of a series of scripts found. Thus, a user can use the pipeline as intended with snakemake, or use individal scripts as documented below.
+However, the toolkit is composed of a series of scripts found in workflow/scripts. Thus, a user can use the pipeline as intended with snakemake, or use individal scripts as documented below.
 
 # Dependencies
 
@@ -27,105 +27,110 @@ conda activate nanoprint
 # Pipeline
 
 ```
-                                    ┌─────────────────────────────────────────────┐
-                                    │           PHASE 1: MAPPING & QC             │
-                                    └─────────────────────────────────────────────┘
-                                                         │
-                    ┌────────────────────────────────────┼────────────────────────────────────┐
-                    │                                    │                                    │
-                    ▼                                    ▼                                    │
-        ┌───────────────────┐              ┌───────────────────┐                             │
-        │  1. read_stats    │              │   2. map_reads    │                             │
-        │  (Read_stats.sh)  │              │  (Map_reads.sh)   │                             │
-        └───────────────────┘              └─────────┬─────────┘                             │
-                                                     │                                       │
-                                                     ▼                                       │
-                                          ┌───────────────────────┐                          │
-                                          │ 3. filter_alignments  │                          │
-                                          │(Filter_alignments.sh) │                          │
-                                          └─────────┬─────────────┘                          │
-                                                    │                                        │
-                                     ┌──────────────┴──────────────┐                         │
-                                     │                             │                         │
-                                     ▼                             ▼                         │
-                          ┌───────────────────┐         ┌───────────────────┐               │
-                          │ 4. alignment_stats│         │   5. histograms   │               │
-                          │(Alignment_stats.sh│         │(Make_histograms.sh│               │
-                          └───────────────────┘         └───────────────────┘               │
-                                                                                             │
-                                    ┌─────────────────────────────────────────────┐          │
-                                    │      PHASE 2: PER-BASE ERROR                │          │
-                                    └─────────────────────────────────────────────┘          │
-                                                         │                                   │
-                                                         ▼                                   │
-                                          ┌───────────────────────┐                          │
-                                          │   6. perbase_error    │◄─────────────────────────┘
+ ┌─────────────────────────────────────────────┐
+ │           PHASE 1: MAPPING & QC             │
+ └─────────────────────────────────────────────┘
+              ┌─────────────────────────────────────────────┐
+              │      Raw reads (fastq, unaligned bam)       │
+              └─────────────────────────────────────────────┘
+                                     │
+                    ┌────────────────┼───────────────────┐
+                    │                                    │                                    
+                    ▼                                    ▼                                    
+        ┌───────────────────┐              ┌───────────────────┐                             
+        │  1. read_stats    │              │   2. map_reads    │                             
+        │  (Read_stats.sh)  │              │  (Map_reads.sh)   │                             
+        └───────────────────┘              └─────────┬─────────┘                             
+                                                     │                                       
+                                                     ▼                                       
+                                          ┌───────────────────────┐                          
+                                          │ 3. filter_alignments  │                          
+                                          │(Filter_alignments.sh) │                          
+                                          └─────────┬─────────────┘                          
+                                                    │                                        
+                       ┌────────────────────────────┼──────────────────────────┐                         
+                       │                            │                          │                         
+                       ▼                            │                          ▼                         
+        ┌───────────────────┐                       │              ┌───────────────────┐               
+        │ 4. alignment_stats│                       │              │   5. histograms   │               
+        │(Alignment_stats.sh│                       │              │(Make_histograms.sh│               
+        └───────────────────┘                       │              └───────────────────┘               
+                                                    │                                         
+┌─────────────────────────────────────────────┐     │   
+│      PHASE 2: PER-BASE ERROR                │     │     
+└─────────────────────────────────────────────┘     │     
+                                                    │                                        
+                                                    ▼                                   
+                                          ┌───────────────────────┐                          
+                                          │   6. perbase_error    │
                                           │  (perbase_error.sh)   │
-                                          └─────────┬─────────────┘
-                                                    │
-                              ┌──────────────────────┴──────────────────────┐
+                                          └──────────┬────────────┘
+                                                     │
+                              ┌──────────────────────┼──────────────────────┐
                               │                                             │
                               ▼                                             ▼
-                   ┌─────────────────────────┐                   ┌───────────────────┐
-                   │ 7. split_perbase_by_chr │                   │   8. correlation  │
-                   │    (Split_by_chr.sh)    │                   │  (Correlation.sh) │
-                   │      [CHECKPOINT]       │                   └───────────────────┘
-                   └───────────┬─────────────┘
-                               │
-                               │  (per chromosome)
-                               │
-                    ┌─────────────────────────────────────────────┐
-                    │       PHASE 3: REACTIVITY                   │
-                    └─────────────────────────────────────────────┘
-                                           │
-                                           ▼
-                              ┌─────────────────────────┐
-                              │ 9. calculate_reactivity │
-                              │(Calculate_reactivity.sh)│
+                   ┌─────────────────────────┐                  ┌───────────────────┐
+                   │ 7. split_perbase_by_chr │                  │  8. correlation   │
+                   │    (Split_by_chr.sh)    │                  │ (Correlation.sh)  │
+                   │      [CHECKPOINT]       │                  └───────────────────┘
+                   └───────────┬─────────────┘       
+                               │                     
+                               │  (per chromosome)   
+                               │                     
+┌───────────────────────┐      ┼──────────────────────────────────┐
+│ PHASE 3: REACTIVITY   │      │                                  │
+└───────────────────────┘      │                                  │
+                               │                                  │
+                               ▼                                  │
+                     ┌─────────────────────────┐                  │
+                     │ 9. calculate_reactivity │                  │
+                     │(Calculate_reactivity.sh)│                  │
+                     └───────────┬─────────────┘                  │
+                                 │                                │
+              ┌──────────────────┼───────────────────────────┐    │
+              │                  │                           │    │
+              │                  │                           │    │
+┌─────────┐   │                  │                           │    │
+│PHASE 4: │   │                  │                           │    │
+│OUTPUT   │   │                  │                           │    │
+│FORMATS  │   │                  │                           │    │
+└─────────┘   │                  │                           │    │
+              │                  │                           │    │
+              ▼                  ▼                           │    │
+┌─────────────────────────┐   ┌─────────────────────────┐    │    │
+│10. reactivity_to_bedgraph│  │  12. bedgraph_to_bigwig │    │    │
+│   (react_to_bg.sh)      │   │     (bg_to_bw.sh)       │    │    │
+└───────────┬─────────────┘   └───────────┬─────────────┘    │    │
+            │                             │ (merge           │    │
+            ▼                             ▼  chromosomes)    │    │
+┌─────────────────────────┐   ┌─────────────────────────┐    │    │
+│ 11. reactivity_density  │   │   13. merge_bigwig      │    │    │
+│   (react_dens.sh)       │   │   (Merge_bigwig.sh)     │    │    │
+└───────────┬─────────────┘   └─────────────────────────┘    │    │
+            │ (merge chromosomes)                            │    │
+            ▼                                                │    │
+┌─────────────────────────┐                                  │    │
+│   14. merge_density     │                                  │    │
+│   (Merge_density.sh)    │                                  │    │
+└─────────────────────────┘                                  │    │
+                                                             │    │
+┌──────────────────────────────┐                             │    │
+│ PHASE 5: FEATURE ANNOTATION  │                             │    │
+└──────────────────────────────┘                             │    │
+                                                             │    │
+                                                             │    │
+                              ┌─────────────────────────┐    │    │
+                              │15. split_features_by_chr│    │    │
+                              │    (Split_by_chr.sh)    │    │    │
+                              │      [CHECKPOINT]       │    │    │
+                              └───────────┬─────────────┘    │    │
+                                          │                  │    │
+                                          ▼                  │    │
+                              ┌─────────────────────────┐    │    │
+                              │  16. annotate_features  │◄───┘    │
+                              │ (annotate_features.sh)  │◄────────┘
                               └───────────┬─────────────┘
-                                          │
-           ┌──────────────────────────────┼──────────────────────────────┐
-           │                              │                              │
-           │                              │                              │
-           │   ┌─────────────────────────────────────────────┐           │
-           │   │       PHASE 4: OUTPUT FORMATS               │           │
-           │   └─────────────────────────────────────────────┘           │
-           │                              │                              │
-           ▼                              ▼                              │
-┌─────────────────────────┐   ┌─────────────────────────┐               │
-│10. reactivity_to_bedgraph│  │  12. bedgraph_to_bigwig │               │
-│   (react_to_bg.sh)      │   │     (bg_to_bw.sh)       │               │
-└───────────┬─────────────┘   └───────────┬─────────────┘               │
-            │                             │                              │
-            ▼                             ▼                              │
-┌─────────────────────────┐   ┌─────────────────────────┐               │
-│ 11. reactivity_density  │   │   13. merge_bigwig      │               │
-│   (react_dens.sh)       │   │   (Merge_bigwig.sh)     │               │
-└───────────┬─────────────┘   └─────────────────────────┘               │
-            │                                                            │
-            ▼                                                            │
-┌─────────────────────────┐                                             │
-│   14. merge_density     │                                             │
-│   (Merge_density.sh)    │                                             │
-└─────────────────────────┘                                             │
-                                                                         │
-                    ┌─────────────────────────────────────────────┐      │
-                    │       PHASE 5: FEATURE ANNOTATION           │      │
-                    └─────────────────────────────────────────────┘      │
-                                           │                             │
-                                           ▼                             │
-                              ┌─────────────────────────┐                │
-                              │15. split_features_by_chr│                │
-                              │    (Split_by_chr.sh)    │                │
-                              │      [CHECKPOINT]       │                │
-                              └───────────┬─────────────┘                │
-                                          │                              │
-                                          ▼                              │
-                              ┌─────────────────────────┐                │
-                              │  16. annotate_features  │◄───────────────┘
-                              │ (annotate_features.sh)  │
-                              └───────────┬─────────────┘
-                                          │
+                                          │ (merge chromosomes)
                                           ▼
                               ┌─────────────────────────┐
                               │  17. merge_annotations  │
@@ -133,10 +138,10 @@ conda activate nanoprint
                               └───────────┬─────────────┘
                                           │
                                           ▼
-                              ┌─────────────────────────┐
-                              │ 18. average_annotations │
+                              ┌───────────────────────────────┐
+                              │ 18. average_annotations       │
                               │(average_feature_annotation.sh)│
-                              └─────────────────────────┘
+                              └───────────────────────────────┘
 ```
 
 # Commands
