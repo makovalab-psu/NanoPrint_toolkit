@@ -1,0 +1,30 @@
+name: nanoprint
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  # Workflow engine
+  - snakemake
+
+  # Alignment and BAM processing
+  - samtools
+  - minimap2
+  - seqtk
+
+  # Genomic interval tools
+  - bedtools
+  - ucsc-bedgraphtobigwig
+  - ucsc-bigwigtobedgraph
+
+  # Text processing utilities
+  - gawk
+  - bc
+
+  # Python
+  - python>=3.8
+
+  # R and packages
+  - r-base
+  - r-ggplot2
+  - r-dplyr

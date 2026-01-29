@@ -5,14 +5,14 @@
 rule perbase_error:
     """Calculate per-base error rates from filtered alignments."""
     input:
-        bam="data/filtered_alignments/{genome}/{sample}.bam",
+        bam="data/filtered_alignments/{genome}/{raw_sample}.bam",
         genome="resources/genomes/{genome}.fa"
     output:
-        error="data/perbase_error/{genome}/{sample}_{strand}.txt.gz"
+        error="data/perbase_error/{genome}/{raw_sample}_{strand}.txt.gz"
     params:
         strand_flag=lambda wildcards: "--for" if wildcards.strand == "for" else "--rev"
     log:
-        "logs/perbase_error/{genome}/{sample}_{strand}.log"
+        "logs/perbase_error/{genome}/{raw_sample}_{strand}.log"
     wildcard_constraints:
         strand="for|rev"
     shell:
@@ -29,11 +29,11 @@ rule perbase_error:
 checkpoint split_perbase_by_chr:
     """Split per-base error file by chromosome for parallelization."""
     input:
-        error="data/perbase_error/{genome}/{sample}_{strand}.txt.gz"
+        error="data/perbase_error/{genome}/{raw_sample}_{strand}.txt.gz"
     output:
-        directory("data/perbase_error_by_chr/{genome}/{sample}_{strand}")
+        directory("data/perbase_error_by_chr/{genome}/{raw_sample}_{strand}")
     log:
-        "logs/split_perbase_by_chr/{genome}/{sample}_{strand}.log"
+        "logs/split_perbase_by_chr/{genome}/{raw_sample}_{strand}.log"
     wildcard_constraints:
         strand="for|rev"
     shell:
@@ -43,22 +43,22 @@ checkpoint split_perbase_by_chr:
             -i {input.error} \
             2>&1 | tee {log}
         # Move split files to output directory
-        mv data/perbase_error/{wildcards.genome}/{wildcards.sample}_{wildcards.strand}_*.txt {output}/
+        mv data/perbase_error/{wildcards.genome}/{wildcards.raw_sample}_{wildcards.strand}_*.txt {output}/
         """
 
 
 rule correlation:
     """Correlate per-base error between two samples via random subsampling."""
     input:
-        file_a="data/perbase_error/{genome}/{sample_a}_{strand}.txt.gz",
-        file_b="data/perbase_error/{genome}/{sample_b}_{strand}.txt.gz",
+        file_a="data/perbase_error/{genome}/{raw_sample_a}_{strand}.txt.gz",
+        file_b="data/perbase_error/{genome}/{raw_sample_b}_{strand}.txt.gz",
         fai="resources/genomes/{genome}.fa.fai"
     output:
-        correlation="tables/correlation/{genome}/{sample_a}_vs_{sample_b}_{strand}.txt"
+        correlation="tables/correlation/{genome}/{raw_sample_a}_vs_{raw_sample_b}_{strand}.txt"
     params:
         subsamples=config.get("correlation_subsamples", 10000)
     log:
-        "logs/correlation/{genome}/{sample_a}_vs_{sample_b}_{strand}.log"
+        "logs/correlation/{genome}/{raw_sample_a}_vs_{raw_sample_b}_{strand}.log"
     wildcard_constraints:
         strand="for|rev"
     shell:

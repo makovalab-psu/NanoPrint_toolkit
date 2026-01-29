@@ -6,6 +6,24 @@ NanoPrint_toolkit is a Snakemake-based pipeline for analyzing chemical footprint
 
 However, the toolkit is composed of a series of scripts found. Thus, a user can use the pipeline as intended with snakemake, or use individal scripts as documented below.
 
+# Dependencies
+
+All dependencies can be installed via conda:
+
+```bash
+conda env create -f environment.yml
+conda activate nanoprint
+```
+
+| Category | Tools |
+|----------|-------|
+| Workflow | snakemake |
+| Alignment | samtools, minimap2, seqtk |
+| Genomic intervals | bedtools, ucsc-bedgraphtobigwig, ucsc-bigwigtobedgraph |
+| Text processing | gawk, bc |
+| Languages | python (>=3.8), R |
+| R packages | ggplot2, dplyr |
+
 # Pipeline
 
 ```

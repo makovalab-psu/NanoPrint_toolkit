@@ -1,0 +1,16 @@
+#Genomes, place in resources/genomes/
+^g	test_genome.fa
+
+#Features to annotate, place in resources/features/
+^f	g4Discovery.bed
+
+# Window size
+^w	1000000
+^w	10000
+
+#Significance threshold level, 1 is p <= 0.05,  2 is p <= 0.01,  3 is p <= 0.001,  4 is p <= 0.0001.
+^s	2 
+
+#Relationships between files
+#^           Sample                                  Treatment                                             Control
+^r	Hsap_HG002_LCL		Hsap_HG002_LCL_Mn04.bam	Hsap_HG002_LCL_CTRL.bam

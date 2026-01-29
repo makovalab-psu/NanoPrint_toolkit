@@ -1,15 +1,49 @@
 # Phase 1: Read Mapping & Quality Control
 # Rules for mapping, filtering, and QC statistics
 
+import os
+import glob as pyglob
+
+
+def find_raw_reads(wildcards):
+    """Find raw read file regardless of extension (.fastq, .fastq.gz, .bam)."""
+    raw_sample = wildcards.raw_sample
+    base_path = f"raw_data/{raw_sample}"
+
+    # Check for each supported extension in order of preference
+    for ext in [".fastq.gz", ".fastq", ".bam"]:
+        if os.path.exists(base_path + ext):
+            return base_path + ext
+
+    # If no file found, return expected path (will fail with clear error)
+    raise FileNotFoundError(
+        f"No raw reads found for {raw_sample}. "
+        f"Expected one of: {base_path}.fastq.gz, {base_path}.fastq, {base_path}.bam"
+    )
+
+
+rule genome_faidx:
+    """Create FASTA index file for reference genome."""
+    input:
+        fa="resources/genomes/{genome}.fa"
+    output:
+        fai="resources/genomes/{genome}.fa.fai"
+    log:
+        "logs/genome_faidx/{genome}.log"
+    shell:
+        """
+        samtools faidx {input.fa} 2>&1 | tee {log}
+        """
+
 
 rule read_stats:
     """Calculate sequencing statistics from raw reads."""
     input:
-        reads="raw_data/{sample}.fastq.gz"
+        reads=find_raw_reads
     output:
-        stats="tables/read_stats/{sample}.txt"
+        stats="tables/read_stats/{raw_sample}.txt"
     log:
-        "logs/read_stats/{sample}.log"
+        "logs/read_stats/{raw_sample}.log"
     shell:
         """
         workflow/scripts/Read_stats.sh \
@@ -22,12 +56,12 @@ rule read_stats:
 rule map_reads:
     """Map raw reads to reference genome using minimap2."""
     input:
-        reads="raw_data/{sample}.fastq.gz",
+        reads=find_raw_reads,
         genome="resources/genomes/{genome}.fa"
     output:
-        bam="data/aligned_reads/{genome}/{sample}.bam"
+        bam="data/aligned_reads/{genome}/{raw_sample}.bam"
     log:
-        "logs/map_reads/{genome}/{sample}.log"
+        "logs/map_reads/{genome}/{raw_sample}.log"
     shell:
         """
         workflow/scripts/Map_reads.sh \
@@ -41,11 +75,11 @@ rule map_reads:
 rule filter_alignments:
     """Filter alignments by mapping quality and remove secondary/supplementary."""
     input:
-        bam="data/aligned_reads/{genome}/{sample}.bam"
+        bam="data/aligned_reads/{genome}/{raw_sample}.bam"
     output:
-        bam="data/filtered_alignments/{genome}/{sample}.bam"
+        bam="data/filtered_alignments/{genome}/{raw_sample}.bam"
     log:
-        "logs/filter_alignments/{genome}/{sample}.log"
+        "logs/filter_alignments/{genome}/{raw_sample}.log"
     shell:
         """
         workflow/scripts/Filter_alignments.sh \
@@ -58,16 +92,16 @@ rule filter_alignments:
 rule alignment_stats:
     """Generate alignment statistics from raw and filtered BAMs."""
     input:
-        raw_bam="data/aligned_reads/{genome}/{sample}.bam",
-        filtered_bam="data/filtered_alignments/{genome}/{sample}.bam"
+        raw_bam="data/aligned_reads/{genome}/{raw_sample}.bam",
+        filtered_bam="data/filtered_alignments/{genome}/{raw_sample}.bam"
     output:
-        raw_flagstats="data/aligned_reads/{genome}/{sample}_flagstats.txt",
-        raw_stats="data/aligned_reads/{genome}/{sample}_stats.txt",
-        filtered_flagstats="data/filtered_alignments/{genome}/{sample}_flagstats.txt",
-        filtered_stats="data/filtered_alignments/{genome}/{sample}_stats.txt",
-        table="tables/alignment_stats/{genome}/{sample}.txt"
+        raw_flagstats="data/aligned_reads/{genome}/{raw_sample}_flagstats.txt",
+        raw_stats="data/aligned_reads/{genome}/{raw_sample}_stats.txt",
+        filtered_flagstats="data/filtered_alignments/{genome}/{raw_sample}_flagstats.txt",
+        filtered_stats="data/filtered_alignments/{genome}/{raw_sample}_stats.txt",
+        table="tables/alignment_stats/{genome}/{raw_sample}.txt"
     log:
-        "logs/alignment_stats/{genome}/{sample}.log"
+        "logs/alignment_stats/{genome}/{raw_sample}.log"
     shell:
         """
         workflow/scripts/Alignment_stats.sh \
@@ -81,12 +115,12 @@ rule alignment_stats:
 rule histograms:
     """Extract histogram data and generate PDF plots from stats files."""
     input:
-        stats="data/{alignment}/{genome}/{sample}_stats.txt"
+        stats="data/{alignment}/{genome}/{raw_sample}_stats.txt"
     output:
-        txt="data/{alignment}/{genome}/{sample}_histograms.txt",
-        pdf="data/{alignment}/{genome}/{sample}_histograms.pdf"
+        txt="data/{alignment}/{genome}/{raw_sample}_histograms.txt",
+        pdf="data/{alignment}/{genome}/{raw_sample}_histograms.pdf"
     log:
-        "logs/histograms/{alignment}/{genome}/{sample}.log"
+        "logs/histograms/{alignment}/{genome}/{raw_sample}.log"
     wildcard_constraints:
         alignment="aligned_reads|filtered_alignments"
     shell:
