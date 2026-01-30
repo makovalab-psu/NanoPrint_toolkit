@@ -187,7 +187,7 @@ declare -a FLAGSTAT_PATTERNS=(
     "supplementary$"
     "duplicates$"
     "primary duplicates"
-    "^[0-9].*mapped ("
+    "^[0-9].*mapped \("
     "primary mapped"
     "paired in sequencing"
     "read1$"
@@ -196,7 +196,7 @@ declare -a FLAGSTAT_PATTERNS=(
     "with itself and mate mapped"
     "singletons"
     "with mate mapped to a different chr$"
-    "with mate mapped to a different chr (mapQ>=5)"
+    "with mate mapped to a different chr \(mapQ>=5\)"
 )
 
 declare -a FLAGSTAT_NAMES=(
