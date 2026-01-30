@@ -22,3 +22,10 @@ claude/
 # Temporary files
 *.tmp
 tmp_*/
+
+# Snakemake
+.snakemake/
+Snakefile
+logs/
+tables/
+dag.pdf

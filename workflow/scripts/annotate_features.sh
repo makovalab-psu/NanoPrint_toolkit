@@ -31,7 +31,7 @@ Optional arguments:
     -h                      Show this help message
 
 Input formats:
-    BED file: chr, start, end, strand (tab-delimited)
+    BED file: Standard BED6 format (chr, start, end, name, score, strand)
     Per-base error: chr, position, nucleotide, coverage, error (tab-delimited)
     Reactivity: chr, position, nucleotide, reactivity (tab-delimited)
 
@@ -216,7 +216,8 @@ with gzip.open(output_file, 'wt') as out:
 
             start = int(fields[1])
             end = int(fields[2])
-            feature_strand = fields[3] if len(fields) > 3 else '+'
+            # Strand is in column 6 (index 5) per BED format
+            feature_strand = fields[5] if len(fields) > 5 else '+'
 
             # Determine reference position
             if feature_strand == '-':

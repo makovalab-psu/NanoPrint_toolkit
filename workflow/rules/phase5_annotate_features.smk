@@ -2,41 +2,49 @@
 # Rules for calculating signal around genomic features
 
 
-checkpoint split_features_by_chr:
+rule split_features_by_chr:
     """Split feature BED file by chromosome for parallelization."""
     input:
         bed="resources/features/{feature}.bed"
     output:
-        directory("resources/features/{feature}_by_chr")
+        done="resources/features/{feature}_by_chr/.done"
+    params:
+        outdir="resources/features/{feature}_by_chr"
     log:
         "logs/split_features/{feature}.log"
     shell:
         """
-        mkdir -p {output}
+        mkdir -p {params.outdir}
         workflow/scripts/Split_by_chr.sh \
             -i {input.bed} \
             2>&1 | tee {log}
         # Move split files to output directory
-        mv resources/features/{wildcards.feature}_*.bed {output}/
+        mv resources/features/{wildcards.feature}_*.bed {params.outdir}/
+        touch {output.done}
+        """
+
+
+rule feature_chr_file:
+    """Declare individual chromosome BED files produced by split_features_by_chr."""
+    input:
+        done="resources/features/{feature}_by_chr/.done"
+    output:
+        file="resources/features/{feature}_by_chr/{feature}_{chr}.bed"
+    shell:
+        """
+        # File was created by split_features_by_chr, just verify it exists
+        test -f {output.file}
         """
 
 
 def get_feature_chromosomes(wildcards):
-    """Get list of chromosomes from split feature checkpoint."""
-    checkpoint_output = checkpoints.split_features_by_chr.get(
-        feature=wildcards.feature
-    ).output[0]
-    import glob
-    import os
-    pattern = os.path.join(checkpoint_output, f"{wildcards.feature}_*.bed")
-    files = glob.glob(pattern)
-    chrs = [os.path.basename(f).replace(f"{wildcards.feature}_", "").replace(".bed", "") for f in files]
-    return chrs
+    """Get list of chromosomes for a feature."""
+    return FEATURE_CHROMOSOMES[wildcards.feature]
 
 
 def get_annotation_chr_files(wildcards):
     """Get all chromosome annotation files for merging."""
-    chrs = get_feature_chromosomes(wildcards)
+    chrs = FEATURE_CHROMOSOMES[wildcards.feature]
     return expand(
         "data/annotations/{genome}/{feature}/{sample}_{strand}_{chr}.txt.gz",
         genome=wildcards.genome,
@@ -47,13 +55,22 @@ def get_annotation_chr_files(wildcards):
     )
 
 
+def get_annotate_inputs(wildcards):
+    """Get input files for annotate_features rule."""
+    treatment = get_treatment(wildcards.sample)
+    control = get_control(wildcards.sample)
+    return {
+        "bed": f"resources/features/{wildcards.feature}_by_chr/{wildcards.feature}_{wildcards.chr}.bed",
+        "treatment": f"data/perbase_error_by_chr/{wildcards.genome}/{treatment}_{wildcards.strand}/{treatment}_{wildcards.strand}_{wildcards.chr}.txt",
+        "control": f"data/perbase_error_by_chr/{wildcards.genome}/{control}_{wildcards.strand}/{control}_{wildcards.strand}_{wildcards.chr}.txt",
+        "reactivity": f"data/reactivity/{wildcards.genome}/{wildcards.sample}_{wildcards.strand}_{wildcards.chr}.txt.gz"
+    }
+
+
 rule annotate_features:
     """Calculate signal around genomic features (per chromosome)."""
     input:
-        bed="resources/features/{feature}_by_chr/{feature}_{chr}.bed",
-        treatment="data/perbase_error_by_chr/{genome}/{treatment_sample}_{strand}/{treatment_sample}_{strand}_{chr}.txt",
-        control="data/perbase_error_by_chr/{genome}/{control_sample}_{strand}/{control_sample}_{strand}_{chr}.txt",
-        reactivity="data/reactivity/{genome}/{sample}_{strand}_{chr}.txt.gz"
+        unpack(get_annotate_inputs)
     output:
         annotation="data/annotations/{genome}/{feature}/{sample}_{strand}_{chr}.txt.gz"
     params:

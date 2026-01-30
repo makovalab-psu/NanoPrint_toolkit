@@ -1,0 +1,242 @@
+# NanoPrint Toolkit - Workflow Summary
+
+## Overview
+
+NanoPrint_toolkit is a Snakemake-based pipeline for analyzing **chemical footprinting data** from Oxford Nanopore long-read sequencing. It processes raw sequencing reads through alignment, per-base error quantification, and reactivity calculation (treatment minus control).
+
+## Key Concepts
+
+- **Per-base error**: Error rate at each genomic position, calculated from aligned reads
+- **Reactivity**: Difference between treatment and control per-base error rates
+- **Parallelization**: Data is split by chromosome for efficient parallel processing
+- **Raw samples**: Individual treatment/control FASTQ/BAM files processed in phases 1-2
+- **Relationship samples**: Combined sample names used in phases 3-5 outputs
+
+## Configuration
+
+### CONFIG File Format
+
+The pipeline is configured via a CONFIG file with prefix notation:
+
+| Prefix | Description | Example |
+|--------|-------------|---------|
+| `^g` | Genome file (in resources/genomes/) | `^g test_genome.fa` |
+| `^f` | Feature file (in resources/features/) | `^f g4Discovery.bed` |
+| `^w` | Window size for density calculation | `^w 1000000` |
+| `^s` | Significance threshold (1-4) | `^s 2` |
+| `^r` | Relationship: Sample, Treatment, Control | `^r SampleName Treatment.bam Control.bam` |
+
+Extensions are automatically stripped from all file values.
+
+### Generating the Snakefile
+
+```bash
+./workflow/scripts/CONFIG.sh -i CONFIG -o Snakefile
+```
+
+This parses CONFIG and generates a Snakefile with:
+- Hardcoded wildcard lists (GENOMES, FEATURES, etc.)
+- RELATIONSHIPS dict mapping sample → (treatment, control)
+- `rule all` with expand() for all target outputs
+
+## Wildcards
+
+| Wildcard | Phase | Description |
+|----------|-------|-------------|
+| `{genome}` | All | Reference genome name |
+| `{raw_sample}` | 1-2 | Individual treatment/control sample |
+| `{raw_sample_a}`, `{raw_sample_b}` | 2 | Samples for correlation |
+| `{sample}` | 3-5 | Relationship sample name (output prefix) |
+| `{treatment_sample}`, `{control_sample}` | 3, 5 | Raw sample names for inputs |
+| `{strand}` | 2-5 | `for` or `rev` |
+| `{chr}` | 3-5 | Chromosome (from checkpoints) |
+| `{size}` | 4 | Window size |
+| `{sig}` | 4 | Significance threshold level |
+| `{feature}` | 5 | Feature name |
+| `{alignment}` | 1 | `aligned_reads` or `filtered_alignments` |
+
+## Sample Flow
+
+```
+CONFIG Relationship:
+^r  Hsap_HG002_LCL  Hsap_HG002_LCL_Mn04.bam  Hsap_HG002_LCL_CTRL.bam
+    └─ {sample}     └─ {treatment_sample}     └─ {control_sample}
+                    └────────────────────────────────────────────┘
+                              These are {raw_sample} values
+
+Phases 1-2: Process EACH raw sample independently
+┌─────────────────────────────────────────────────────────────────┐
+│  Hsap_HG002_LCL_Mn04 → perbase_error/Hsap_HG002_LCL_Mn04_for.txt.gz
+│  Hsap_HG002_LCL_CTRL → perbase_error/Hsap_HG002_LCL_CTRL_for.txt.gz
+└─────────────────────────────────────────────────────────────────┘
+
+Phases 3-5: Combine using {sample} from relationship
+┌─────────────────────────────────────────────────────────────────┐
+│  treatment: Hsap_HG002_LCL_Mn04 ─┐
+│                                  ├→ reactivity/Hsap_HG002_LCL_for_chr1.txt.gz
+│  control:   Hsap_HG002_LCL_CTRL ─┘
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Input File Flexibility
+
+Phase 1 rules use `find_raw_reads()` helper function that automatically detects input format:
+- Checks for `.fastq.gz`, `.fastq`, `.bam` in order
+- No need to specify extension in CONFIG
+
+## Pipeline Phases
+
+### Phase 1: Mapping & QC (Steps 1-5)
+- Calculate read statistics (N50, Q50, total bases)
+- Map reads to reference genome with minimap2
+- Filter alignments (MAPQ >= 20, remove secondary/supplementary)
+- Generate alignment statistics and histograms
+
+### Phase 2: Per-base Error (Steps 6-8)
+- Calculate per-base error rates from filtered alignments (strand-specific)
+- Split files by chromosome (checkpoint for parallelization)
+- Correlate per-base error between samples via random subsampling
+
+### Phase 3: Reactivity (Step 9)
+- Calculate reactivity: treatment_error - control_error
+- Operates per-chromosome for parallel processing
+
+### Phase 4: Output Formats (Steps 10-14)
+- Convert reactivity to bedGraph format with significance thresholds
+- Calculate reactive nucleotide density in genomic windows
+- Convert bedGraph to bigWig format
+- Merge chromosome-split files back together
+
+### Phase 5: Feature Annotation (Steps 15-18)
+- Split feature BED files by chromosome
+- Calculate signal around genomic features (TSS, etc.)
+- Merge and average annotations
+
+## Dependencies
+
+Install via conda:
+```bash
+conda env create -f environment.yml
+conda activate nanoprint
+```
+
+- samtools, minimap2, seqtk (alignment)
+- bedtools, UCSC tools (bedGraphToBigWig, bigWigToBedGraph)
+- gawk, bc, python3
+- R with ggplot2, dplyr
+
+## Directory Structure
+
+```
+CONFIG                   # User configuration file
+Snakefile                # Auto-generated by CONFIG.sh
+data/                    # Pipeline outputs
+  aligned_reads/         # Raw mapped reads
+  filtered_alignments/   # Quality-filtered BAMs
+  perbase_error/         # Per-base error calculations
+  perbase_error_by_chr/  # Split by chromosome
+  reactivity/            # Treatment - control
+  bg/                    # bedGraph files
+  bw/                    # bigWig files
+  bw_merged/             # Merged bigWig files
+  windows/               # Density calculations
+  annotations/           # Feature annotations
+raw_data/                # Input FASTQ/BAM files
+resources/
+  genomes/               # Reference genomes (.fa)
+  features/              # Feature BED files
+tables/                  # Summary statistics
+workflow/
+  scripts/               # Shell scripts including CONFIG.sh
+  rules/                 # Snakemake rule files (phases 1-5)
+```
+
+## Usage
+
+1. Create CONFIG file with your samples and settings
+2. Generate Snakefile: `./workflow/scripts/CONFIG.sh -i CONFIG -o Snakefile`
+3. Run pipeline: `snakemake --cores <N>`
+
+Or use individual scripts directly (see README for documentation).
+
+---
+
+## Development Notes
+
+### Checkpoint Removal (Jan 2026)
+
+The original workflow used Snakemake checkpoints (`split_perbase_by_chr`, `split_features_by_chr`) to dynamically determine chromosome wildcards at runtime. This caused issues:
+- Could not generate DAG diagram before running
+- `MissingInputException` errors when checkpoint outputs didn't match expected inputs
+- Fragile dependency resolution
+
+**Solution: Marker file pattern**
+
+Instead of checkpoints, chromosome wildcards are now hardcoded at CONFIG.sh generation time:
+
+1. **CONFIG.sh extracts chromosomes**:
+   - `CHROMOSOMES` dict: from genome `.fai` files (`cut -f1`)
+   - `FEATURE_CHROMOSOMES` dict: from BED column 1 (`cut -f1 | sort -u`), filtered to only chromosomes present in the genome
+
+2. **Split rules output marker files**:
+   ```python
+   rule split_perbase_by_chr:
+       output:
+           done="data/perbase_error_by_chr/{genome}/{raw_sample}_{strand}/.done"
+       shell:
+           """
+           # ... split files ...
+           touch {output.done}
+           """
+   ```
+
+3. **Passthrough rules declare individual files**:
+   ```python
+   rule perbase_chr_file:
+       input:
+           done="data/perbase_error_by_chr/{genome}/{raw_sample}_{strand}/.done"
+       output:
+           file="data/perbase_error_by_chr/{genome}/{raw_sample}_{strand}/{raw_sample}_{strand}_{chr}.txt"
+       shell:
+           "test -f {output.file}"
+   ```
+
+This pattern establishes the dependency chain: `split rule (.done)` → `passthrough rule (.txt)` → `downstream rules`
+
+### Bash 3.2 Compatibility
+
+macOS ships with bash 3.2 (due to GPL licensing). CONFIG.sh must avoid:
+- **Associative arrays** (`declare -A`) - use parallel arrays instead
+- **`mapfile`** - use `$(command)` with word splitting instead
+
+Example workaround:
+```bash
+# Instead of associative arrays:
+declare -a GENOME_CHR_NAMES=()
+declare -a GENOME_CHR_VALUES=()
+GENOME_CHR_NAMES+=("$genome")
+GENOME_CHR_VALUES+=("$chrs")
+```
+
+### BED File Format
+
+Feature BED files must be **BED6 format** with strand in **column 6** (not column 4):
+```
+chrom  start  end  name  score  strand
+[0]    [1]    [2]  [3]   [4]    [5]
+```
+
+The `annotate_features.sh` script reads strand from `fields[5]`.
+
+### File Path Conventions
+
+Per-base error split files follow this structure:
+```
+data/perbase_error_by_chr/{genome}/{raw_sample}_{strand}/{raw_sample}_{strand}_{chr}.txt
+```
+
+BedGraph files (phase 4) are at:
+```
+data/bg/{genome}/{sample}_{strand}_{chr}.bg
+```
+(Note: NOT `data/bg_by_chr/` - this was a bug that was fixed)

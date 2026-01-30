@@ -140,6 +140,81 @@ done
 # Remove duplicates
 RAW_SAMPLES=($(printf '%s\n' "${RAW_SAMPLES[@]}" | sort -u))
 
+# ============================================================================
+# Extract chromosomes from genome .fai files
+# ============================================================================
+# Use parallel arrays for bash 3.2 compatibility (no associative arrays)
+declare -a GENOME_CHR_NAMES=()    # genome names (parallel to GENOME_CHR_VALUES)
+declare -a GENOME_CHR_VALUES=()   # space-separated chromosome lists
+
+for genome in "${GENOMES[@]}"; do
+    fai_file="resources/genomes/${genome}.fa.fai"
+    if [[ ! -f "$fai_file" ]]; then
+        echo "Creating index for ${genome}.fa..."
+        samtools faidx "resources/genomes/${genome}.fa"
+    fi
+    # Extract chromosome names from column 1
+    chrs=$(cut -f1 "$fai_file" | tr '\n' ' ')
+    GENOME_CHR_NAMES+=("$genome")
+    GENOME_CHR_VALUES+=("$chrs")
+done
+
+# Helper to get chromosomes for a genome (returns via RESULT variable)
+get_genome_chrs() {
+    local target="$1"
+    RESULT=""
+    for i in "${!GENOME_CHR_NAMES[@]}"; do
+        if [[ "${GENOME_CHR_NAMES[$i]}" == "$target" ]]; then
+            RESULT="${GENOME_CHR_VALUES[$i]}"
+            return
+        fi
+    done
+}
+
+# ============================================================================
+# Extract chromosomes from feature BED files (filtered to genome chromosomes)
+# ============================================================================
+declare -a FEATURE_CHR_NAMES=()   # feature names (parallel to FEATURE_CHR_VALUES)
+declare -a FEATURE_CHR_VALUES=()  # space-separated chromosome lists
+
+for feature in "${FEATURES[@]}"; do
+    bed_file="resources/features/${feature}.bed"
+    if [[ ! -f "$bed_file" ]]; then
+        echo "Error: Feature BED file not found: $bed_file" >&2
+        exit 1
+    fi
+
+    # Get genome chromosomes (using first genome as reference)
+    get_genome_chrs "${GENOMES[0]}"
+    genome_chrs="$RESULT"
+
+    # Get unique chromosomes from BED file, filter to those in genome
+    bed_chrs=$(cut -f1 "$bed_file" | sort -u)
+    filtered_chrs=""
+    for chr in $bed_chrs; do
+        # Check if chr is in genome_chrs (space-delimited search)
+        if [[ " $genome_chrs " == *" $chr "* ]]; then
+            filtered_chrs="$filtered_chrs $chr"
+        fi
+    done
+    # Trim leading space
+    filtered_chrs="${filtered_chrs# }"
+    FEATURE_CHR_NAMES+=("$feature")
+    FEATURE_CHR_VALUES+=("$filtered_chrs")
+done
+
+# Helper to get chromosomes for a feature (returns via RESULT variable)
+get_feature_chrs() {
+    local target="$1"
+    RESULT=""
+    for i in "${!FEATURE_CHR_NAMES[@]}"; do
+        if [[ "${FEATURE_CHR_NAMES[$i]}" == "$target" ]]; then
+            RESULT="${FEATURE_CHR_VALUES[$i]}"
+            return
+        fi
+    done
+}
+
 # Helper function to format array as Python list
 python_list() {
     local arr=("$@")
@@ -206,6 +281,24 @@ EOF
     echo "RELATIONSHIPS = {"
     for i in "${!SAMPLES[@]}"; do
         echo "    \"${SAMPLES[$i]}\": (\"${TREATMENTS[$i]}\", \"${CONTROLS[$i]}\"),"
+    done
+    echo "}"
+    echo ""
+    echo "# Chromosomes per genome (from .fai files)"
+    echo "CHROMOSOMES = {"
+    for i in "${!GENOME_CHR_NAMES[@]}"; do
+        genome="${GENOME_CHR_NAMES[$i]}"
+        chrs_array=(${GENOME_CHR_VALUES[$i]})
+        echo "    \"$genome\": $(python_list "${chrs_array[@]}"),"
+    done
+    echo "}"
+    echo ""
+    echo "# Chromosomes per feature (filtered to genome chromosomes)"
+    echo "FEATURE_CHROMOSOMES = {"
+    for i in "${!FEATURE_CHR_NAMES[@]}"; do
+        feature="${FEATURE_CHR_NAMES[$i]}"
+        chrs_array=(${FEATURE_CHR_VALUES[$i]})
+        echo "    \"$feature\": $(python_list "${chrs_array[@]}"),"
     done
     echo "}"
     echo ""
@@ -277,4 +370,18 @@ echo "  Sig levels:     ${#SIG_LEVELS[@]} (${SIG_LEVELS[*]})"
 echo "  Relationships:  ${#SAMPLES[@]}"
 for i in "${!SAMPLES[@]}"; do
     echo "    ${SAMPLES[$i]}: ${TREATMENTS[$i]} vs ${CONTROLS[$i]}"
+done
+echo ""
+echo "Chromosomes per genome:"
+for i in "${!GENOME_CHR_NAMES[@]}"; do
+    genome="${GENOME_CHR_NAMES[$i]}"
+    chrs_array=(${GENOME_CHR_VALUES[$i]})
+    echo "  $genome: ${#chrs_array[@]} chromosomes"
+done
+echo ""
+echo "Chromosomes per feature (filtered to genome):"
+for i in "${!FEATURE_CHR_NAMES[@]}"; do
+    feature="${FEATURE_CHR_NAMES[$i]}"
+    chrs_array=(${FEATURE_CHR_VALUES[$i]})
+    echo "  $feature: ${#chrs_array[@]} chromosomes"
 done

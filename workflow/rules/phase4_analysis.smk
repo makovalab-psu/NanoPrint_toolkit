@@ -2,6 +2,33 @@
 # Rules for generating bedGraph, bigWig, and density analysis
 
 
+def get_density_chr_files(wildcards):
+    """Get all chromosome density files for merging."""
+    chrs = CHROMOSOMES[wildcards.genome]
+    return expand(
+        "data/windows/{genome}/window_size_{size}/significance_threshold_{sig}/{sample}_{strand}_{chr}.bg",
+        genome=wildcards.genome,
+        size=wildcards.size,
+        sig=wildcards.sig,
+        sample=wildcards.sample,
+        strand=wildcards.strand,
+        chr=chrs
+    )
+
+
+def get_bigwig_chr_files(wildcards):
+    """Get all chromosome bigWig files for merging."""
+    chrs = CHROMOSOMES[wildcards.genome]
+    return expand(
+        "data/bw/{genome}/significance_threshold_{sig}/{sample}_{strand}_{chr}.bw",
+        genome=wildcards.genome,
+        sig=wildcards.sig,
+        sample=wildcards.sample,
+        strand=wildcards.strand,
+        chr=chrs
+    )
+
+
 rule reactivity_to_bedgraph:
     """Convert reactivity data to bedGraph format."""
     input:
@@ -23,7 +50,7 @@ rule reactivity_to_bedgraph:
 rule reactivity_density:
     """Calculate reactive nucleotide density in genomic windows (per chromosome)."""
     input:
-        bedgraph="data/bg_by_chr/{genome}/{sample}_{strand}/{sample}_{strand}_{chr}.bg",
+        bedgraph="data/bg/{genome}/{sample}_{strand}_{chr}.bg",
         fai="resources/genomes/{genome}.fa.fai"
     output:
         density="data/windows/{genome}/window_size_{size}/significance_threshold_{sig}/{sample}_{strand}_{chr}.bg"
@@ -45,7 +72,7 @@ rule reactivity_density:
 rule merge_density:
     """Merge chromosome-split density files in genome order."""
     input:
-        files=expand("data/windows/{genome}/window_size_{size}/significance_threshold_{sig}/{sample}_{strand}_{chr}.bg", chr = CHR)
+        files=get_density_chr_files,
         fai="resources/genomes/{genome}.fa.fai"
     output:
         merged="data/windows_merged/{genome}/window_size_{size}/significance_threshold_{sig}/{sample}_{strand}.bg"
@@ -65,7 +92,7 @@ rule merge_density:
 rule bedgraph_to_bigwig:
     """Convert bedGraph to bigWig format (per chromosome)."""
     input:
-        bedgraph="data/bg_by_chr/{genome}/{sample}_{strand}/{sample}_{strand}_{chr}.bg",
+        bedgraph="data/bg/{genome}/{sample}_{strand}_{chr}.bg",
         fai="resources/genomes/{genome}.fa.fai"
     output:
         bigwig="data/bw/{genome}/significance_threshold_{sig}/{sample}_{strand}_{chr}.bw"
@@ -86,7 +113,7 @@ rule bedgraph_to_bigwig:
 rule merge_bigwig:
     """Merge chromosome-split bigWig files in genome order."""
     input:
-        files=expand("data/bw/{genome}/significance_threshold_{sig}/{sample}_{strand}_{chr}.bw", chr = CHR)
+        files=get_bigwig_chr_files,
         fai="resources/genomes/{genome}.fa.fai"
     output:
         merged="data/bw_merged/{genome}/significance_threshold_{sig}/{sample}_{strand}.bw"

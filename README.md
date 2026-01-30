@@ -6,6 +6,259 @@ NanoPrint_toolkit is a Snakemake-based pipeline for analyzing chemical footprint
 
 However, the toolkit is composed of a series of scripts found in workflow/scripts. Thus, a user can use the pipeline as intended with snakemake, or use individal scripts as documented below.
 
+# Inputs
+
+## Raw Sequencing Reads
+
+### Description
+Oxford Nanopore sequencing reads for treatment and control samples. Treatment samples are typically treated with a chemical probe (e.g., permanganate) while control samples are untreated.
+
+### Format
+Standard FASTQ (gzipped) or unaligned BAM format.
+
+### Location
+`raw_data/{sample}.fastq.gz` or `raw_data/{sample}.bam`
+
+---
+
+## Reference Genome
+
+### Description
+Reference genome sequence for read alignment.
+
+### Format
+Standard FASTA format with accompanying FAI index (created automatically by the pipeline).
+
+### Location
+`resources/genomes/{genome}.fa`
+
+---
+
+## Feature BED Files
+
+### Description
+Genomic features for annotation analysis (e.g., transcription start sites, G-quadruplexes). The pipeline calculates signal profiles around these features.
+
+### Format
+Standard BED6 format (tab-delimited, no header):
+| Column | Name | Description |
+|--------|------|-------------|
+| 1 | chrom | Chromosome name |
+| 2 | chromStart | Start position (0-based) |
+| 3 | chromEnd | End position |
+| 4 | name | Feature name/identifier |
+| 5 | score | Score value |
+| 6 | strand | Strand (+ or -) |
+
+### Example
+```
+chr19_MATERNAL	5	26	GQ:HUNTER=-1.71	64	-
+chr19_MATERNAL	36	57	GQ:HUNTER=-1.71	64	-
+chr19_MATERNAL	60	81	GQ:HUNTER=-1.71	64	-
+chr19_MATERNAL	84	105	GQ:HUNTER=-1.71	64	-
+chr19_MATERNAL	109	130	GQ:HUNTER=-1.71	64	-
+chr19_MATERNAL	133	154	GQ:HUNTER=-1.71	64	-
+chr19_MATERNAL	175	194	GQ:HUNTER=-1.89	67	-
+chr19_MATERNAL	197	218	GQ:HUNTER=-1.86	64	-
+chr19_MATERNAL	221	242	GQ:HUNTER=-1.71	64	-
+chr19_MATERNAL	245	266	GQ:HUNTER=-1.71	64	-
+```
+
+### Location
+`resources/features/{feature}.bed`
+
+---
+
+# Outputs
+
+## Per-base Error Files
+
+### Description
+Per-base error rates calculated from aligned reads, separated by strand. Error rate represents the probability of a sequencing error at each genomic position.
+
+### Format
+Tab-delimited, gzipped, no header:
+| Column | Name | Description |
+|--------|------|-------------|
+| 1 | chrom | Chromosome name |
+| 2 | position | Genomic position (1-based) |
+| 3 | nucleotide | Reference nucleotide (A, C, G, T) |
+| 4 | coverage | Read coverage at position |
+| 5 | error | Per-base error probability |
+
+### Example
+```
+chr19_MATERNAL	1	C	45	0.022222
+chr19_MATERNAL	2	C	47	0.021277
+chr19_MATERNAL	3	T	48	0.020833
+chr19_MATERNAL	4	A	52	0.019231
+chr19_MATERNAL	5	A	55	0.018182
+chr19_MATERNAL	6	C	58	0.017241
+chr19_MATERNAL	7	C	60	0.016667
+chr19_MATERNAL	8	C	62	0.016129
+chr19_MATERNAL	9	T	65	0.015385
+chr19_MATERNAL	10	A	67	0.014925
+```
+
+### Location
+`data/perbase_error/{genome}/{sample}_{strand}.txt.gz`
+
+---
+
+## Reactivity Files
+
+### Description
+Reactivity values calculated as treatment error minus control error at each position. Positive values indicate increased error in treatment (chemical modification signal).
+
+### Format
+Tab-delimited, gzipped, no header:
+| Column | Name | Description |
+|--------|------|-------------|
+| 1 | chrom | Chromosome name |
+| 2 | position | Genomic position (1-based) |
+| 3 | nucleotide | Reference nucleotide |
+| 4 | reactivity | Treatment error - Control error (999999 = missing in control, -999999 = missing in treatment) |
+
+### Example
+```
+chr19_MATERNAL	1	C	0.003241
+chr19_MATERNAL	2	C	0.001852
+chr19_MATERNAL	3	T	-0.000421
+chr19_MATERNAL	4	A	0.002156
+chr19_MATERNAL	5	A	0.004523
+chr19_MATERNAL	6	C	0.001234
+chr19_MATERNAL	7	C	-0.000156
+chr19_MATERNAL	8	C	0.002789
+chr19_MATERNAL	9	T	0.003456
+chr19_MATERNAL	10	A	0.001567
+```
+
+### Location
+`data/reactivity/{genome}/{sample}_{strand}_{chr}.txt.gz`
+
+---
+
+## BedGraph Files
+
+### Description
+Reactivity data in UCSC bedGraph format with significance threshold information in the header.
+
+### Format
+UCSC bedGraph (tab-delimited, with header comments):
+| Column | Name | Description |
+|--------|------|-------------|
+| 1 | chrom | Chromosome name |
+| 2 | chromStart | Start position (0-based) |
+| 3 | chromEnd | End position |
+| 4 | value | Reactivity value |
+
+### Example
+```
+# Significance thresholds:
+# p < 0.05 (black):    reactivity >= 0.002887
+# p < 0.01 (#FF8C00):  reactivity >= 0.004327
+# p < 0.001 (red):     reactivity >= 0.005892
+# p < 1e-04 (#810000): reactivity >= 0.007456
+chr19_MATERNAL	0	1	0.003241
+chr19_MATERNAL	1	2	0.001852
+chr19_MATERNAL	2	3	-0.000421
+chr19_MATERNAL	3	4	0.002156
+chr19_MATERNAL	4	5	0.004523
+chr19_MATERNAL	5	6	0.001234
+chr19_MATERNAL	6	7	-0.000156
+chr19_MATERNAL	7	8	0.002789
+chr19_MATERNAL	8	9	0.003456
+chr19_MATERNAL	9	10	0.001567
+```
+
+### Location
+`data/bg/{genome}/{sample}_{strand}_{chr}.bg`
+
+---
+
+## BigWig Files
+
+### Description
+Binary indexed format for efficient visualization of reactivity data in genome browsers. Filtered by significance threshold.
+
+### Format
+UCSC bigWig binary format (viewable in IGV, UCSC Genome Browser, etc.)
+
+### Location
+`data/bw_merged/{genome}/significance_threshold_{sig}/{sample}_{strand}.bw`
+
+---
+
+## Density BedGraph Files
+
+### Description
+Count of significantly reactive nucleotides within genomic windows.
+
+### Format
+Tab-delimited bedGraph, no header:
+| Column | Name | Description |
+|--------|------|-------------|
+| 1 | chrom | Chromosome name |
+| 2 | chromStart | Window start (0-based) |
+| 3 | chromEnd | Window end |
+| 4 | count | Number of reactive nucleotides in window |
+| 5 | sum | Sum of reactivity values in window |
+
+### Example
+```
+chr19_MATERNAL	0	1000000	523	2.456789
+chr19_MATERNAL	1000000	2000000	612	3.123456
+chr19_MATERNAL	2000000	3000000	489	2.234567
+chr19_MATERNAL	3000000	4000000	534	2.567890
+chr19_MATERNAL	4000000	5000000	601	2.890123
+chr19_MATERNAL	5000000	6000000	578	2.678901
+chr19_MATERNAL	6000000	7000000	545	2.345678
+chr19_MATERNAL	7000000	8000000	567	2.456789
+chr19_MATERNAL	8000000	9000000	589	2.567890
+chr19_MATERNAL	9000000	10000000	612	2.789012
+```
+
+### Location
+`data/windows_merged/{genome}/window_size_{size}/significance_threshold_{sig}/{sample}_{strand}.bg`
+
+---
+
+## Feature Annotation Files
+
+### Description
+Signal profiles around genomic features, showing coverage, per-base error, and reactivity as a function of distance from the feature.
+
+### Format
+Tab-delimited, gzipped, with header:
+| Column | Name | Description |
+|--------|------|-------------|
+| 1 | Distance | Distance from feature reference point (bp) |
+| 2 | Coverage | Average read coverage |
+| 3 | Perbase_error | Average per-base error |
+| 4 | Reactivity | Average reactivity (Treatment only) |
+| 5 | Sample | Treatment or Control |
+| 6 | Strand | for or rev |
+
+### Example
+```
+Distance	Coverage	Perbase_error	Reactivity	Sample	Strand
+-10000	45.23	0.018234	0.002341	Treatment	for
+-9990	46.12	0.017892	0.002456	Treatment	for
+-9980	44.89	0.018456	0.002234	Treatment	for
+-9970	45.67	0.018123	0.002567	Treatment	for
+-9960	46.34	0.017789	0.002678	Treatment	for
+-10000	44.56	0.015893		Control	for
+-9990	45.23	0.015456		Control	for
+-9980	44.12	0.016012		Control	for
+-9970	45.89	0.015556		Control	for
+-9960	46.01	0.015111		Control	for
+```
+
+### Location
+`data/annotations_averaged/{genome}/{feature}/{sample}_{strand}.txt.gz`
+
+---
+
 # Dependencies
 
 All dependencies can be installed via conda:

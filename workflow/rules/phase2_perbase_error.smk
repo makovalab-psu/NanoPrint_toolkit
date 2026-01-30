@@ -26,24 +26,42 @@ rule perbase_error:
         """
 
 
-checkpoint split_perbase_by_chr:
+rule split_perbase_by_chr:
     """Split per-base error file by chromosome for parallelization."""
     input:
         error="data/perbase_error/{genome}/{raw_sample}_{strand}.txt.gz"
     output:
-        directory("data/perbase_error_by_chr/{genome}/{raw_sample}_{strand}")
+        done="data/perbase_error_by_chr/{genome}/{raw_sample}_{strand}/.done"
+    params:
+        outdir="data/perbase_error_by_chr/{genome}/{raw_sample}_{strand}"
     log:
         "logs/split_perbase_by_chr/{genome}/{raw_sample}_{strand}.log"
     wildcard_constraints:
         strand="for|rev"
     shell:
         """
-        mkdir -p {output}
+        mkdir -p {params.outdir}
         workflow/scripts/Split_by_chr.sh \
             -i {input.error} \
             2>&1 | tee {log}
         # Move split files to output directory
-        mv data/perbase_error/{wildcards.genome}/{wildcards.raw_sample}_{wildcards.strand}_*.txt {output}/
+        mv data/perbase_error/{wildcards.genome}/{wildcards.raw_sample}_{wildcards.strand}_*.txt {params.outdir}/
+        touch {output.done}
+        """
+
+
+rule perbase_chr_file:
+    """Declare individual chromosome files produced by split_perbase_by_chr."""
+    input:
+        done="data/perbase_error_by_chr/{genome}/{raw_sample}_{strand}/.done"
+    output:
+        file="data/perbase_error_by_chr/{genome}/{raw_sample}_{strand}/{raw_sample}_{strand}_{chr}.txt"
+    wildcard_constraints:
+        strand="for|rev"
+    shell:
+        """
+        # File was created by split_perbase_by_chr, just verify it exists
+        test -f {output.file}
         """
 
 

@@ -14,4 +14,4 @@
 
 #Relationships between files
 #^           Sample                                  Treatment                                             Control
-^r	Hsap_HG002_LCL		Hsap_HG002_LCL_Mn04.bam	Hsap_HG002_LCL_CTRL.bam
+^r	Hsap_HG002_LCL	Hsap_HG002_LCL_Mn04.bam	Hsap_HG002_LCL_CTRL.bam

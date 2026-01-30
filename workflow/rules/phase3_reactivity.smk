@@ -2,11 +2,20 @@
 # Rules for calculating reactivity (treatment - control) per chromosome
 
 
+def get_reactivity_inputs(wildcards):
+    """Get input files for calculate_reactivity rule."""
+    treatment = get_treatment(wildcards.sample)
+    control = get_control(wildcards.sample)
+    return {
+        "treatment": f"data/perbase_error_by_chr/{wildcards.genome}/{treatment}_{wildcards.strand}/{treatment}_{wildcards.strand}_{wildcards.chr}.txt",
+        "control": f"data/perbase_error_by_chr/{wildcards.genome}/{control}_{wildcards.strand}/{control}_{wildcards.strand}_{wildcards.chr}.txt"
+    }
+
+
 rule calculate_reactivity:
     """Calculate reactivity by comparing treatment to control samples (per chromosome)."""
     input:
-        treatment="data/perbase_error_by_chr/{genome}/{treatment_sample}_{strand}/{treatment_sample}_{strand}_{chr}.txt",
-        control="data/perbase_error_by_chr/{genome}/{control_sample}_{strand}/{control_sample}_{strand}_{chr}.txt"
+        unpack(get_reactivity_inputs)
     output:
         reactivity="data/reactivity/{genome}/{sample}_{strand}_{chr}.txt.gz"
     log:
