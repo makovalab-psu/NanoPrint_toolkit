@@ -17,7 +17,7 @@ rule calculate_reactivity:
     input:
         unpack(get_reactivity_inputs)
     output:
-        reactivity="data/reactivity/{genome}/{sample}_{strand}_{chr}.txt.gz"
+        reactivity=wrap_output("reactivity", "data/reactivity/{genome}/{sample}_{strand}_{chr}.txt.gz")
     log:
         "logs/reactivity/{genome}/{sample}_{strand}_{chr}.log"
     benchmark:

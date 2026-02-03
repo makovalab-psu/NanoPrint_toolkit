@@ -37,8 +37,9 @@ rule split_perbase_by_chr:
     input:
         error="data/perbase_error/{genome}/{raw_sample}_{strand}.txt.gz"
     output:
-        expand("data/perbase_error_by_chr/{{genome}}/{{raw_sample}}_{{strand}}/{{raw_sample}}_{{strand}}_{chr}.txt.gz",
-               chr=CHROMOSOMES["test_genome"])
+        [wrap_output("perbase_error_by_chr", f) for f in
+         expand("data/perbase_error_by_chr/{{genome}}/{{raw_sample}}_{{strand}}/{{raw_sample}}_{{strand}}_{chr}.txt.gz",
+                chr=CHROMOSOMES["test_genome"])]
     params:
         outdir="data/perbase_error_by_chr/{genome}/{raw_sample}_{strand}"
     log:

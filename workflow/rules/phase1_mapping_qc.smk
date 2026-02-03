@@ -63,7 +63,7 @@ rule map_reads:
         reads=find_raw_reads,
         genome="resources/genomes/{genome}.fa"
     output:
-        bam="data/aligned_reads/{genome}/{raw_sample}.bam"
+        bam=wrap_output("aligned_reads_bam", "data/aligned_reads/{genome}/{raw_sample}.bam")
     log:
         "logs/map_reads/{genome}/{raw_sample}.log"
     benchmark:

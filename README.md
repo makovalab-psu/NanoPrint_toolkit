@@ -305,11 +305,20 @@ Your CONFIG file should look something like this:
 ^w	10000
 
 #Significance threshold level, 1 is p <= 0.05,  2 is p <= 0.01,  3 is p <= 0.001,  4 is p <= 0.0001.
-^s	2 
+^s	2
 
 #Relationships between files
 #^    Sample          Treatment                 Control
-^r	   Hsap_HG002_LCL		Hsap_HG002_LCL_Mn04.bam	  Hsap_HG002_LCL_CTRL.bam
+^r	Hsap_HG002_LCL	Hsap_HG002_LCL_Mn04.bam	Hsap_HG002_LCL_CTRL.bam
+
+# Temporary intermediate files (deleted after downstream rules complete)
+# Remove these lines to keep all intermediate files
+^t	data/aligned_reads
+^t	data/bg
+^t	data/bw
+^t	data/windows
+^t	data/annotations
+^t	data/annotations_merged
 ```
 The wildcard variables are assigned designated as:
 
@@ -318,6 +327,7 @@ The wildcard variables are assigned designated as:
 ^w The window files you want in the windows bed files
 ^s The significance threshold for identifying reactive nucleotides
 ^r The relationship between sequencing reads
+^t Directories containing temporary files (auto-deleted after use)
 
 If you want to try out alternative variables, just add another row.
 
@@ -1351,3 +1361,54 @@ These markers are filtered out at two points in the pipeline:
 2. **Phase 5 - `annotate_features.sh`**: Skips marker values when calculating window averages
 
 All downstream steps (density calculation, bigWig conversion, merging, averaging) receive pre-filtered data and require no special handling. Windows that contain no valid reactivity data output an empty string for the reactivity column rather than a default value.
+
+## Temporary File Management
+
+The pipeline can automatically delete intermediate files after they are no longer needed, reducing disk usage. This is controlled via `^t` prefix lines in the CONFIG file.
+
+### How It Works
+
+Files in directories marked with `^t` are wrapped with Snakemake's `temp()` function, which automatically deletes them after all downstream rules that depend on them have completed.
+
+### Temporary vs Kept Files
+
+**Files marked as temporary (deleted after use):**
+
+| Directory | Contents | Deleted After |
+|-----------|----------|---------------|
+| `data/aligned_reads/` | Raw BAM alignments | `filter_alignments`, `alignment_stats` complete |
+| `data/bg/` | Per-chromosome bedGraph | `reactivity_density`, `bedgraph_to_bigwig` complete |
+| `data/bw/` | Per-chromosome bigWig | `merge_bigwig` complete |
+| `data/windows/` | Per-chromosome density | `merge_density` complete |
+| `data/annotations/` | Per-chromosome annotations | `merge_annotations` complete |
+| `data/annotations_merged/` | Pre-averaged annotations | `average_annotations` complete |
+
+**Files always kept (final outputs):**
+
+| Directory | Contents |
+|-----------|----------|
+| `data/filtered_alignments/` | Quality-filtered BAM files |
+| `data/perbase_error/` | Per-base error rates (whole genome) |
+| `data/perbase_error_by_chr/` | Per-base error (chromosome splits) |
+| `data/reactivity/` | Reactivity values (chromosome splits) |
+| `data/bw_merged/` | Final merged bigWig files |
+| `data/windows_merged/` | Final merged density files |
+| `data/annotations_averaged/` | Final averaged annotations |
+| `tables/` | All QC statistics tables |
+| `logs/` | Execution logs |
+| `benchmarks/` | Performance metrics |
+
+### Customizing Temporary Files
+
+To keep all intermediate files (original behavior), remove all `^t` lines from CONFIG.
+
+To mark additional directories as temporary, add `^t` lines:
+```
+^t  data/perbase_error_by_chr
+^t  data/reactivity
+```
+
+After modifying CONFIG, regenerate the Snakefile:
+```bash
+./workflow/scripts/CONFIG.sh -i CONFIG -o Snakefile
+```

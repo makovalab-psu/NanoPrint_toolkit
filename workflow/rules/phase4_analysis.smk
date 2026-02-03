@@ -34,7 +34,7 @@ rule reactivity_to_bedgraph:
     input:
         reactivity="data/reactivity/{genome}/{sample}_{strand}_{chr}.txt.gz"
     output:
-        bedgraph="data/bg/{genome}/{sample}_{strand}_{chr}.bg"
+        bedgraph=wrap_output("bg", "data/bg/{genome}/{sample}_{strand}_{chr}.bg")
     log:
         "logs/bedgraph/{genome}/{sample}_{strand}_{chr}.log"
     benchmark:
@@ -55,7 +55,7 @@ rule reactivity_density:
         bedgraph="data/bg/{genome}/{sample}_{strand}_{chr}.bg",
         fai="resources/genomes/{genome}.fa.fai"
     output:
-        density="data/windows/{genome}/window_size_{size}/significance_threshold_{sig}/{sample}_{strand}_{chr}.bg"
+        density=wrap_output("windows", "data/windows/{genome}/window_size_{size}/significance_threshold_{sig}/{sample}_{strand}_{chr}.bg")
     log:
         "logs/density/{genome}/{sample}_{strand}_{chr}_w{size}_s{sig}.log"
     benchmark:
@@ -101,7 +101,7 @@ rule bedgraph_to_bigwig:
         bedgraph="data/bg/{genome}/{sample}_{strand}_{chr}.bg",
         fai="resources/genomes/{genome}.fa.fai"
     output:
-        bigwig="data/bw/{genome}/significance_threshold_{sig}/{sample}_{strand}_{chr}.bw"
+        bigwig=wrap_output("bw", "data/bw/{genome}/significance_threshold_{sig}/{sample}_{strand}_{chr}.bw")
     log:
         "logs/bigwig/{genome}/{sample}_{strand}_{chr}_s{sig}.log"
     benchmark:

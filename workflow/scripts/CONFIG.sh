@@ -50,6 +50,7 @@ declare -a SIG_LEVELS=()
 declare -a SAMPLES=()
 declare -a TREATMENTS=()
 declare -a CONTROLS=()
+declare -a TEMP_DIRS=()
 
 # Function to strip file extension
 strip_ext() {
@@ -124,6 +125,13 @@ while IFS= read -r line || [[ -n "$line" ]]; do
                 SAMPLES+=("$sample")
                 TREATMENTS+=("$treatment")
                 CONTROLS+=("$control")
+                ;;
+            "^t")
+                # Temporary directory pattern
+                value=$(echo "$values" | cut -f1)
+                # Trim trailing slashes
+                value="${value%/}"
+                TEMP_DIRS+=("$value")
                 ;;
         esac
     fi
@@ -302,6 +310,25 @@ EOF
     done
     echo "}"
     echo ""
+    echo "# Directories to mark as temporary (auto-deleted after downstream rules complete)"
+    if [[ ${#TEMP_DIRS[@]} -gt 0 ]]; then
+        echo "TEMP_DIRS = $(python_list "${TEMP_DIRS[@]}")"
+    else
+        echo "TEMP_DIRS = []"
+    fi
+    echo ""
+    echo "# Mapping of output keys to whether they should be temporary"
+    echo "TEMP_OUTPUTS = {"
+    echo "    \"aligned_reads_bam\": \"data/aligned_reads\" in TEMP_DIRS,"
+    echo "    \"perbase_error_by_chr\": \"data/perbase_error_by_chr\" in TEMP_DIRS,"
+    echo "    \"reactivity\": \"data/reactivity\" in TEMP_DIRS,"
+    echo "    \"bg\": \"data/bg\" in TEMP_DIRS,"
+    echo "    \"windows\": \"data/windows\" in TEMP_DIRS,"
+    echo "    \"bw\": \"data/bw\" in TEMP_DIRS,"
+    echo "    \"annotations\": \"data/annotations\" in TEMP_DIRS,"
+    echo "    \"annotations_merged\": \"data/annotations_merged\" in TEMP_DIRS,"
+    echo "}"
+    echo ""
 } >> "$OUTPUT_FILE"
 
 # Write helper functions and rules
@@ -317,6 +344,12 @@ def get_treatment(sample):
 def get_control(sample):
     """Get control sample name for a relationship sample."""
     return RELATIONSHIPS[sample][1]
+
+def wrap_output(key, path):
+    """Wrap output path in temp() if configured as temporary."""
+    if TEMP_OUTPUTS.get(key, False):
+        return temp(path)
+    return path
 
 # ============================================================================
 # Include rule files
@@ -385,3 +418,12 @@ for i in "${!FEATURE_CHR_NAMES[@]}"; do
     chrs_array=(${FEATURE_CHR_VALUES[$i]})
     echo "  $feature: ${#chrs_array[@]} chromosomes"
 done
+echo ""
+echo "Temporary directories:"
+if [[ ${#TEMP_DIRS[@]} -gt 0 ]]; then
+    for dir in "${TEMP_DIRS[@]}"; do
+        echo "  $dir"
+    done
+else
+    echo "  (none)"
+fi

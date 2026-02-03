@@ -75,7 +75,7 @@ rule annotate_features:
         unpack(get_annotate_inputs),
         fai="resources/genomes/{genome}.fa.fai"
     output:
-        annotation="data/annotations/{genome}/{feature}/{sample}_{strand}_{chr}.txt.gz"
+        annotation=wrap_output("annotations", "data/annotations/{genome}/{feature}/{sample}_{strand}_{chr}.txt.gz")
     params:
         n_windows=lambda wildcards: FEATURE_PARAMS.get(wildcards.feature, (1000, 10))[0],
         window_size=lambda wildcards: FEATURE_PARAMS.get(wildcards.feature, (1000, 10))[1]
@@ -105,7 +105,7 @@ rule merge_annotations:
     input:
         files=get_annotation_chr_files
     output:
-        merged="data/annotations_merged/{genome}/{feature}/{sample}_{strand}.txt.gz"
+        merged=wrap_output("annotations_merged", "data/annotations_merged/{genome}/{feature}/{sample}_{strand}.txt.gz")
     log:
         "logs/merge_annotations/{genome}/{feature}/{sample}_{strand}.log"
     benchmark:

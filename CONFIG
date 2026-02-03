@@ -15,3 +15,11 @@
 #Relationships between files
 #^           Sample                                  Treatment                                             Control
 ^r	Hsap_HG002_LCL	Hsap_HG002_LCL_Mn04.bam	Hsap_HG002_LCL_CTRL.bam
+
+# Temporary intermediate files (deleted after downstream rules complete)
+^t	data/aligned_reads
+^t	data/bg
+^t	data/bw
+^t	data/windows
+^t	data/annotations
+^t	data/annotations_merged
