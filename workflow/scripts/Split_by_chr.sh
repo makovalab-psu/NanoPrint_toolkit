@@ -21,12 +21,12 @@ Optional arguments:
     -h    Show this help message
 
 Output:
-    Creates <prefix>_<chr>.<ext> for each chromosome in the same directory.
+    Creates <prefix>_<chr>.<ext>.gz for each chromosome in the same directory.
     Prefix is derived from input filename (without extension).
 
 Example:
     $(basename "$0") -i data/perbase_error/sample_for.txt.gz
-    # Creates: data/perbase_error/sample_for_chr1.txt, sample_for_chr2.txt, ...
+    # Creates: data/perbase_error/sample_for_chr1.txt.gz, sample_for_chr2.txt.gz, ...
 EOF
     exit 1
 }
@@ -90,13 +90,13 @@ echo ""
 echo "Splitting file by chromosome..."
 if [[ "$COMPRESSED" == true ]]; then
     gunzip -c "$INPUT" | awk -v prefix="$OUT_PREFIX" -v ext="$EXT" '{
-        output_file = prefix $1 "." ext
-        print > output_file
+        output_file = prefix $1 "." ext ".gz"
+        print | "gzip > " output_file
     }'
 else
     awk -v prefix="$OUT_PREFIX" -v ext="$EXT" '{
-        output_file = prefix $1 "." ext
-        print > output_file
+        output_file = prefix $1 "." ext ".gz"
+        print | "gzip > " output_file
     }' "$INPUT"
 fi
 

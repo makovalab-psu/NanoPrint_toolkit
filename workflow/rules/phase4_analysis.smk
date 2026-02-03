@@ -37,6 +37,8 @@ rule reactivity_to_bedgraph:
         bedgraph="data/bg/{genome}/{sample}_{strand}_{chr}.bg"
     log:
         "logs/bedgraph/{genome}/{sample}_{strand}_{chr}.log"
+    benchmark:
+        "benchmarks/phase4/reactivity_to_bedgraph/{genome}/{sample}_{strand}_{chr}.tsv"
     wildcard_constraints:
         strand="for|rev"
     shell:
@@ -56,15 +58,17 @@ rule reactivity_density:
         density="data/windows/{genome}/window_size_{size}/significance_threshold_{sig}/{sample}_{strand}_{chr}.bg"
     log:
         "logs/density/{genome}/{sample}_{strand}_{chr}_w{size}_s{sig}.log"
+    benchmark:
+        "benchmarks/phase4/reactivity_density/{genome}/{sample}_{strand}_{chr}_{size}_{sig}.tsv"
     wildcard_constraints:
         strand="for|rev"
     shell:
         """
         workflow/scripts/react_dens.sh \
             -i {input.bedgraph} \
-            -f {input.fai} \
+            -g {input.fai} \
             -w {wildcards.size} \
-            -s {wildcards.sig} \
+            -p {wildcards.sig} \
             -o {output.density} \
             2>&1 | tee {log}
         """
@@ -78,6 +82,8 @@ rule merge_density:
         merged="data/windows_merged/{genome}/window_size_{size}/significance_threshold_{sig}/{sample}_{strand}.bg"
     log:
         "logs/merge_density/{genome}/{sample}_{strand}_w{size}_s{sig}.log"
+    benchmark:
+        "benchmarks/phase4/merge_density/{genome}/{sample}_{strand}_{size}_{sig}.tsv"
     wildcard_constraints:
         strand="for|rev"
     shell:
@@ -98,14 +104,16 @@ rule bedgraph_to_bigwig:
         bigwig="data/bw/{genome}/significance_threshold_{sig}/{sample}_{strand}_{chr}.bw"
     log:
         "logs/bigwig/{genome}/{sample}_{strand}_{chr}_s{sig}.log"
+    benchmark:
+        "benchmarks/phase4/bedgraph_to_bigwig/{genome}/{sample}_{strand}_{chr}_{sig}.tsv"
     wildcard_constraints:
         strand="for|rev"
     shell:
         """
         workflow/scripts/bg_to_bw.sh \
             -i {input.bedgraph} \
-            -f {input.fai} \
-            -s {wildcards.sig} \
+            -g {input.fai} \
+            -p {wildcards.sig} \
             -o {output.bigwig} \
             2>&1 | tee {log}
         """
@@ -119,6 +127,8 @@ rule merge_bigwig:
         merged="data/bw_merged/{genome}/significance_threshold_{sig}/{sample}_{strand}.bw"
     log:
         "logs/merge_bigwig/{genome}/{sample}_{strand}_s{sig}.log"
+    benchmark:
+        "benchmarks/phase4/merge_bigwig/{genome}/{sample}_{strand}_{sig}.tsv"
     wildcard_constraints:
         strand="for|rev"
     shell:

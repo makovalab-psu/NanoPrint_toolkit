@@ -13,7 +13,7 @@ with open(Perbase_error_file, 'r') as perbase_error, open(out_file, 'w') as outp
         LINE = perbase_error.readline()
         if not LINE:
             NEXT_LINE = False
-            OUT_LINE = str(i)+"\n"
+            OUT_LINE = "\t" + str(i) + "\t\t\t\n"
         else:
             LINE_split = LINE.strip().split("\t")
             N = int(LINE_split[1])
@@ -22,6 +22,6 @@ with open(Perbase_error_file, 'r') as perbase_error, open(out_file, 'w') as outp
         OUT_LINE = LINE
       else:
         NEXT_LINE = False
-        OUT_LINE = str(i)+"\n"
+        OUT_LINE = "\t" + str(i) + "\t\t\t\n"
       output_file.write(OUT_LINE)
 

@@ -117,18 +117,44 @@ echo ""
 CHROM_SIZES="${TMP_DIR}/chrom.sizes"
 cut -f1,2 "$GENOME_FAI" > "$CHROM_SIZES"
 
-# Build associative array of input files by chromosome
-declare -A FILE_BY_CHR
+# Parallel arrays for Bash 3.2 compatibility (macOS)
+CHR_NAMES=()
+CHR_FILES=()
+
+# Lookup function to get file for a chromosome
+get_file_for_chr() {
+    local target_chr="$1"
+    local i
+    for ((i=0; i<${#CHR_NAMES[@]}; i++)); do
+        if [[ "${CHR_NAMES[i]}" == "$target_chr" ]]; then
+            echo "${CHR_FILES[i]}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Build arrays of input files by chromosome
 for f in "${INPUT_FILES[@]}"; do
     if [[ ! -f "$f" ]]; then
         echo "Warning: Input file not found, skipping: $f" >&2
         continue
     fi
-    # Extract chromosome from filename (assumes format *_<chr>.bw)
+    # Extract chromosome from filename (format: {sample}_{strand}_{chr}.bw)
+    # Strand is always 'for' or 'rev', use it as delimiter since chr may contain underscores
     base=$(basename "$f")
     base_noext="${base%.bw}"
-    chr="${base_noext##*_}"
-    FILE_BY_CHR["$chr"]="$f"
+    # Extract chromosome: everything after _for_ or _rev_
+    if [[ "$base_noext" == *"_for_"* ]]; then
+        chr="${base_noext#*_for_}"
+    elif [[ "$base_noext" == *"_rev_"* ]]; then
+        chr="${base_noext#*_rev_}"
+    else
+        echo "Warning: Cannot extract chromosome from filename (no _for_ or _rev_): $f" >&2
+        continue
+    fi
+    CHR_NAMES+=("$chr")
+    CHR_FILES+=("$f")
 done
 
 # Convert each bigWig to bedGraph and concatenate in genome order
@@ -138,8 +164,8 @@ MERGED_BG="${TMP_DIR}/merged.bg"
 
 merged_count=0
 while read -r chr size rest; do
-    if [[ -n "${FILE_BY_CHR[$chr]:-}" ]]; then
-        bw_file="${FILE_BY_CHR[$chr]}"
+    bw_file=$(get_file_for_chr "$chr")
+    if [[ -n "$bw_file" ]]; then
         tmp_bg="${TMP_DIR}/${chr}.bg"
 
         echo "  Converting $chr..."

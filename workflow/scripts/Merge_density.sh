@@ -79,21 +79,44 @@ echo "Output: $OUTPUT"
 echo "Input files: ${#INPUT_FILES[@]}"
 echo ""
 
-# Build associative array of input files by chromosome
-declare -A FILE_BY_CHR
+# Build parallel arrays of input files by chromosome (Bash 3.2 compatible)
+declare -a CHR_NAMES=()
+declare -a CHR_FILES=()
 for f in "${INPUT_FILES[@]}"; do
     if [[ ! -f "$f" ]]; then
         echo "Warning: Input file not found, skipping: $f" >&2
         continue
     fi
-    # Extract chromosome from filename (assumes format *_<chr>.bg or *_<chr>.txt)
+    # Extract chromosome from filename (format: {sample}_{strand}_{chr}.bg)
+    # Strand is always 'for' or 'rev', use it as delimiter since chr may contain underscores
     base=$(basename "$f")
     # Remove extension
     base_noext="${base%.*}"
-    # Get the last underscore-separated part as chromosome
-    chr="${base_noext##*_}"
-    FILE_BY_CHR["$chr"]="$f"
+    # Extract chromosome: everything after _for_ or _rev_
+    if [[ "$base_noext" == *"_for_"* ]]; then
+        chr="${base_noext#*_for_}"
+    elif [[ "$base_noext" == *"_rev_"* ]]; then
+        chr="${base_noext#*_rev_}"
+    else
+        echo "Warning: Cannot extract chromosome from filename (no _for_ or _rev_): $f" >&2
+        continue
+    fi
+    CHR_NAMES+=("$chr")
+    CHR_FILES+=("$f")
 done
+
+# Helper function to lookup file by chromosome
+get_file_for_chr() {
+    local target="$1"
+    local i
+    for ((i=0; i<${#CHR_NAMES[@]}; i++)); do
+        if [[ "${CHR_NAMES[$i]}" == "$target" ]]; then
+            echo "${CHR_FILES[$i]}"
+            return 0
+        fi
+    done
+    return 1
+}
 
 # Clear output file
 > "$OUTPUT"
@@ -102,11 +125,11 @@ done
 echo "Merging in genome order..."
 merged_count=0
 while read -r chr size rest; do
-    if [[ -n "${FILE_BY_CHR[$chr]:-}" ]]; then
-        cat "${FILE_BY_CHR[$chr]}" >> "$OUTPUT"
-        echo "  + $chr (${FILE_BY_CHR[$chr]})"
+    file=$(get_file_for_chr "$chr") && {
+        cat "$file" >> "$OUTPUT"
+        echo "  + $chr ($file)"
         ((merged_count++))
-    fi
+    }
 done < "$GENOME_FAI"
 
 echo ""

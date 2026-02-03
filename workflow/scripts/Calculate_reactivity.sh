@@ -131,36 +131,8 @@ gunzip -c "$PLUS" > "$PLUS_DECOMP"
 echo "Decompressing control file..."
 gunzip -c "$MINUS" > "$MINUS_DECOMP"
 
-# Extract and validate chromosome names
-echo "Validating chromosome names..."
-
-# Get unique chromosomes from treatment file (column 1)
-PLUS_CHRS=$(cut -f1 "$PLUS_DECOMP" | sort -u)
-PLUS_CHR_COUNT=$(echo "$PLUS_CHRS" | wc -l | tr -d ' ')
-
-if [[ "$PLUS_CHR_COUNT" -ne 1 ]]; then
-    echo "Error: Treatment file contains multiple chromosomes: $PLUS_CHRS" >&2
-    exit 1
-fi
-
-# Get unique chromosomes from control file (column 1)
-MINUS_CHRS=$(cut -f1 "$MINUS_DECOMP" | sort -u)
-MINUS_CHR_COUNT=$(echo "$MINUS_CHRS" | wc -l | tr -d ' ')
-
-if [[ "$MINUS_CHR_COUNT" -ne 1 ]]; then
-    echo "Error: Control file contains multiple chromosomes: $MINUS_CHRS" >&2
-    exit 1
-fi
-
-# Check chromosomes match
-CHR=$(echo "$PLUS_CHRS" | tr -d '\n')
-MINUS_CHR=$(echo "$MINUS_CHRS" | tr -d '\n')
-
-if [[ "$CHR" != "$MINUS_CHR" ]]; then
-    echo "Error: Chromosome mismatch - Treatment: '$CHR', Control: '$MINUS_CHR'" >&2
-    exit 1
-fi
-
+# Get chromosome name from first line of treatment file
+CHR=$(head -n 1 "$PLUS_DECOMP" | cut -f1)
 echo "Chromosome: $CHR"
 
 # Determine chromosome size from max position in both files

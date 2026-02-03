@@ -1331,3 +1331,23 @@ Output format (tab-delimited, gzipped):
 Example:
     average_feature_annotation.sh -i merged_annotations.txt.gz -o averaged_annotations.txt.gz
 ```
+
+---
+
+# Technical Notes
+
+## Special Marker Values in Reactivity Files
+
+Phase 3 (`Calculate_reactivity.sh`) outputs special marker values for positions where data is missing:
+
+| Value | Meaning |
+|-------|---------|
+| `999999` | Position missing in control file |
+| `-999999` | Position missing in treatment file |
+
+These markers are filtered out at two points in the pipeline:
+
+1. **Phase 4 - `react_to_bg.sh`**: Removes rows with marker values before converting to bedGraph format
+2. **Phase 5 - `annotate_features.sh`**: Skips marker values when calculating window averages
+
+All downstream steps (density calculation, bigWig conversion, merging, averaging) receive pre-filtered data and require no special handling. Windows that contain no valid reactivity data output an empty string for the reactivity column rather than a default value.

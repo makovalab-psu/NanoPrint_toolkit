@@ -30,6 +30,8 @@ rule genome_faidx:
         fai="resources/genomes/{genome}.fa.fai"
     log:
         "logs/genome_faidx/{genome}.log"
+    benchmark:
+        "benchmarks/phase1/genome_faidx/{genome}.tsv"
     shell:
         """
         samtools faidx {input.fa} 2>&1 | tee {log}
@@ -44,6 +46,8 @@ rule read_stats:
         stats="tables/read_stats/{raw_sample}.txt"
     log:
         "logs/read_stats/{raw_sample}.log"
+    benchmark:
+        "benchmarks/phase1/read_stats/{raw_sample}.tsv"
     shell:
         """
         workflow/scripts/Read_stats.sh \
@@ -62,6 +66,8 @@ rule map_reads:
         bam="data/aligned_reads/{genome}/{raw_sample}.bam"
     log:
         "logs/map_reads/{genome}/{raw_sample}.log"
+    benchmark:
+        "benchmarks/phase1/map_reads/{genome}/{raw_sample}.tsv"
     shell:
         """
         workflow/scripts/Map_reads.sh \
@@ -80,6 +86,8 @@ rule filter_alignments:
         bam="data/filtered_alignments/{genome}/{raw_sample}.bam"
     log:
         "logs/filter_alignments/{genome}/{raw_sample}.log"
+    benchmark:
+        "benchmarks/phase1/filter_alignments/{genome}/{raw_sample}.tsv"
     shell:
         """
         workflow/scripts/Filter_alignments.sh \
@@ -102,6 +110,8 @@ rule alignment_stats:
         table="tables/alignment_stats/{genome}/{raw_sample}.txt"
     log:
         "logs/alignment_stats/{genome}/{raw_sample}.log"
+    benchmark:
+        "benchmarks/phase1/alignment_stats/{genome}/{raw_sample}.tsv"
     shell:
         """
         workflow/scripts/Alignment_stats.sh \
@@ -121,6 +131,8 @@ rule histograms:
         pdf="data/{alignment}/{genome}/{raw_sample}_histograms.pdf"
     log:
         "logs/histograms/{alignment}/{genome}/{raw_sample}.log"
+    benchmark:
+        "benchmarks/phase1/histograms/{alignment}/{genome}/{raw_sample}.tsv"
     wildcard_constraints:
         alignment="aligned_reads|filtered_alignments"
     shell:

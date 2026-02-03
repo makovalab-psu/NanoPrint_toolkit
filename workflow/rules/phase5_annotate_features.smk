@@ -12,6 +12,8 @@ rule split_features_by_chr:
         outdir="resources/features/{feature}_by_chr"
     log:
         "logs/split_features/{feature}.log"
+    benchmark:
+        "benchmarks/phase5/split_features_by_chr/{feature}.tsv"
     shell:
         """
         mkdir -p {params.outdir}
@@ -61,8 +63,8 @@ def get_annotate_inputs(wildcards):
     control = get_control(wildcards.sample)
     return {
         "bed": f"resources/features/{wildcards.feature}_by_chr/{wildcards.feature}_{wildcards.chr}.bed",
-        "treatment": f"data/perbase_error_by_chr/{wildcards.genome}/{treatment}_{wildcards.strand}/{treatment}_{wildcards.strand}_{wildcards.chr}.txt",
-        "control": f"data/perbase_error_by_chr/{wildcards.genome}/{control}_{wildcards.strand}/{control}_{wildcards.strand}_{wildcards.chr}.txt",
+        "treatment": f"data/perbase_error_by_chr/{wildcards.genome}/{treatment}_{wildcards.strand}/{treatment}_{wildcards.strand}_{wildcards.chr}.txt.gz",
+        "control": f"data/perbase_error_by_chr/{wildcards.genome}/{control}_{wildcards.strand}/{control}_{wildcards.strand}_{wildcards.chr}.txt.gz",
         "reactivity": f"data/reactivity/{wildcards.genome}/{wildcards.sample}_{wildcards.strand}_{wildcards.chr}.txt.gz"
     }
 
@@ -70,7 +72,8 @@ def get_annotate_inputs(wildcards):
 rule annotate_features:
     """Calculate signal around genomic features (per chromosome)."""
     input:
-        unpack(get_annotate_inputs)
+        unpack(get_annotate_inputs),
+        fai="resources/genomes/{genome}.fa.fai"
     output:
         annotation="data/annotations/{genome}/{feature}/{sample}_{strand}_{chr}.txt.gz"
     params:
@@ -78,6 +81,8 @@ rule annotate_features:
         window_size=lambda wildcards: FEATURE_PARAMS.get(wildcards.feature, (1000, 10))[1]
     log:
         "logs/annotate_features/{genome}/{feature}/{sample}_{strand}_{chr}.log"
+    benchmark:
+        "benchmarks/phase5/annotate_features/{genome}/{feature}/{sample}_{strand}_{chr}.tsv"
     wildcard_constraints:
         strand="for|rev"
     shell:
@@ -87,6 +92,7 @@ rule annotate_features:
             -t {input.treatment} \
             -c {input.control} \
             -r {input.reactivity} \
+            -g {input.fai} \
             -o {output.annotation} \
             -n {params.n_windows} \
             -w {params.window_size} \
@@ -102,6 +108,8 @@ rule merge_annotations:
         merged="data/annotations_merged/{genome}/{feature}/{sample}_{strand}.txt.gz"
     log:
         "logs/merge_annotations/{genome}/{feature}/{sample}_{strand}.log"
+    benchmark:
+        "benchmarks/phase5/merge_annotations/{genome}/{feature}/{sample}_{strand}.tsv"
     wildcard_constraints:
         strand="for|rev"
     shell:
@@ -121,6 +129,8 @@ rule average_annotations:
         averaged="data/annotations_averaged/{genome}/{feature}/{sample}_{strand}.txt.gz"
     log:
         "logs/average_annotations/{genome}/{feature}/{sample}_{strand}.log"
+    benchmark:
+        "benchmarks/phase5/average_annotations/{genome}/{feature}/{sample}_{strand}.tsv"
     wildcard_constraints:
         strand="for|rev"
     shell:

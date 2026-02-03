@@ -240,3 +240,64 @@ BedGraph files (phase 4) are at:
 data/bg/{genome}/{sample}_{strand}_{chr}.bg
 ```
 (Note: NOT `data/bg_by_chr/` - this was a bug that was fixed)
+
+### Chunk-Based Memory Management in annotate_features.sh (Feb 2026)
+
+The `annotate_features.sh` script previously loaded entire per-base error files into memory, causing excessive memory usage for large chromosomes (~750MB+ for human chr1).
+
+**Solution: Two-pass chunk-based processing with sliding window cache**
+
+The script now requires a genome index file (`-g <genome.fai>`) and uses 100kb chunks:
+
+**Pass 1: Split inputs into bin temp files (single read through each file)**
+- Reads chromosome name from first line of treatment file (column 1)
+- Looks up chromosome size from `.fai` file
+- Splits each input file into 100kb bins based on position:
+  - `bin_idx = position // 100000`
+  - No data duplication between bins
+- Creates temp files: `tmp/{treatment,control,reactivity}/bin_N.txt`, `tmp/features/bin_N.bed`
+
+**Pass 2: Process features with sliding cache**
+- Features are processed bin-by-bin in sorted order
+- `ChunkCache` class keeps max 2 adjacent bins loaded at once
+- For each feature:
+  1. Calculate window span needed: `[ref_pos - window_span, ref_pos + window_span]`
+  2. Determine which bins are needed (max 2 for boundary cases)
+  3. Cache loads/unloads bins as needed
+  4. Process windows using merged data from loaded bins
+
+**Memory bound**: ~600KB max (2 bins × 3 files × 100kb) vs ~750MB+ previously
+
+**Snakemake rule change**: `phase5_annotate_features.smk` now passes `fai="resources/genomes/{genome}.fa.fai"` to the script via `-g {input.fai}`
+
+```python
+# Sliding window example:
+# Feature at position 98,000 needs data from 88,000 to 108,000
+# - Bin 0 covers [0, 100000) → needed
+# - Bin 1 covers [100000, 200000) → needed
+# Cache loads both bins, processes feature, continues
+```
+
+### Special Marker Values in Reactivity Files
+
+Phase 3 (`Calculate_reactivity.sh`) outputs special marker values for positions missing data:
+- `999999` = position missing in control file
+- `-999999` = position missing in treatment file
+
+**How downstream steps handle these markers:**
+
+| Phase | Rule | Script | Handling |
+|-------|------|--------|----------|
+| 4 | `reactivity_to_bedgraph` | `react_to_bg.sh` | **Explicit filter** (line 97): `awk '$4 != 999999 && $4 != -999999'` |
+| 4 | `reactivity_density` | `react_dens.sh` | Implicit - input is already filtered bedGraph |
+| 4 | `bedgraph_to_bigwig` | `bg_to_bw.sh` | Implicit - input is already filtered bedGraph |
+| 4 | `merge_density` | `Merge_density.sh` | No filtering needed - concatenates filtered data |
+| 4 | `merge_bigwig` | `Merge_bigwig.sh` | No filtering needed - concatenates filtered data |
+| 5 | `annotate_features` | `annotate_features.sh` | **Explicit skip** in Python: `if react == 999999 or react == -999999: continue` |
+| 5 | `merge_annotations` | `Merge_annotations.sh` | No filtering needed - concatenates |
+| 5 | `average_annotations` | `average_feature_annotation.sh` | No filtering needed - averages filtered data |
+
+**Key points:**
+1. Two explicit filter points: `react_to_bg.sh` (line 97) and `annotate_features.sh` (embedded Python)
+2. All downstream scripts receive pre-filtered data
+3. Windows with no valid reactivity data output empty string for reactivity column
