@@ -29,3 +29,5 @@ Snakefile
 logs/
 tables/
 dag.pdf
+benchmarks/
+dag.png

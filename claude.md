@@ -278,6 +278,52 @@ The script now requires a genome index file (`-g <genome.fai>`) and uses 100kb c
 # Cache loads both bins, processes feature, continues
 ```
 
+### Single-Pass Averaging in average_feature_annotation.sh (Feb 2026)
+
+The `average_feature_annotation.sh` script originally used a chunking approach that created individual files for each (distance, sample, strand) combination, then processed each file separately. This caused two problems:
+
+**Bug**: Negative distance values (e.g., `-9990`) created filenames starting with `-`, causing awk redirection errors:
+```
+fatal: cannot redirect to '.../chunks/-9990_Treatment_rev.txt': Operation not permitted
+```
+
+**Performance**: With ~80,000 unique keys (±10,000 distances × 2 samples × 2 strands) and 100M+ input records:
+- Created thousands of temp files
+- Spawned thousands of awk subprocesses in a bash loop
+- Massive I/O overhead
+
+**Solution: Single-pass awk with associative arrays**
+
+The script now uses a single awk invocation that:
+1. Reads all input data in one pass
+2. Accumulates sums using composite keys: `distance SUBSEP sample SUBSEP strand`
+3. Outputs averages at the end
+4. Pipes directly to sort and gzip
+
+```bash
+gunzip -c "$INPUT" | awk '
+BEGIN { FS = "\t"; OFS = "\t" }
+NR == 1 { next }
+{
+    key = $1 SUBSEP $5 SUBSEP $6
+    sum_cov[key] += $2
+    sum_err[key] += $3
+    count[key]++
+    if ($4 != "") { sum_react[key] += $4; react_count[key]++ }
+}
+END {
+    print "Distance\tCoverage\tPerbase_error\tReactivity\tSample\tStrand"
+    for (key in count) { ... output averages ... }
+}
+' | { read -r header; echo "$header"; sort -t$'\t' -k1,1n -k5,5 -k6,6; } | gzip -c > "$OUTPUT"
+```
+
+**Performance impact:**
+- No temp files (eliminates I/O bottleneck)
+- Single process (eliminates subprocess overhead)
+- Memory: ~3-5MB for 80,000 keys (trivial)
+- Runtime: seconds/minutes vs potentially hours
+
 ### Special Marker Values in Reactivity Files
 
 Phase 3 (`Calculate_reactivity.sh`) outputs special marker values for positions missing data:
@@ -301,3 +347,50 @@ Phase 3 (`Calculate_reactivity.sh`) outputs special marker values for positions 
 1. Two explicit filter points: `react_to_bg.sh` (line 97) and `annotate_features.sh` (embedded Python)
 2. All downstream scripts receive pre-filtered data
 3. Windows with no valid reactivity data output empty string for reactivity column
+
+### Snakemake Benchmarking (Feb 2026)
+
+All 18 rules (excluding the lightweight `feature_chr_file` passthrough) have `benchmark:` directives to track resource usage.
+
+**Benchmark output format (TSV):**
+- `s` - Wall clock time (seconds)
+- `h:m:s` - Human-readable time
+- `max_rss` - Maximum resident set size (memory in MB)
+- `max_vms` - Maximum virtual memory size (MB)
+- `io_in` / `io_out` - I/O read/write (MB)
+- `mean_load` - Mean CPU load
+- `cpu_time` - Total CPU time (seconds)
+
+**Benchmark directory structure:**
+```
+benchmarks/
+├── phase1/
+│   ├── genome_faidx/{genome}.tsv
+│   ├── read_stats/{raw_sample}.tsv
+│   ├── map_reads/{genome}/{raw_sample}.tsv
+│   ├── filter_alignments/{genome}/{raw_sample}.tsv
+│   ├── alignment_stats/{genome}/{raw_sample}.tsv
+│   └── histograms/{alignment}/{genome}/{raw_sample}.tsv
+├── phase2/
+│   ├── perbase_error/{genome}/{raw_sample}_{strand}.tsv
+│   ├── split_perbase_by_chr/{genome}/{raw_sample}_{strand}.tsv
+│   └── correlation/{genome}/{raw_sample_a}_vs_{raw_sample_b}_{strand}.tsv
+├── phase3/
+│   └── calculate_reactivity/{genome}/{sample}_{strand}_{chr}.tsv
+├── phase4/
+│   ├── reactivity_to_bedgraph/{genome}/{sample}_{strand}_{chr}.tsv
+│   ├── reactivity_density/{genome}/{sample}_{strand}_{chr}_{size}_{sig}.tsv
+│   ├── merge_density/{genome}/{sample}_{strand}_{size}_{sig}.tsv
+│   ├── bedgraph_to_bigwig/{genome}/{sample}_{strand}_{chr}_{sig}.tsv
+│   └── merge_bigwig/{genome}/{sample}_{strand}_{sig}.tsv
+└── phase5/
+    ├── split_features_by_chr/{feature}.tsv
+    ├── annotate_features/{genome}/{feature}/{sample}_{strand}_{chr}.tsv
+    ├── merge_annotations/{genome}/{feature}/{sample}_{strand}.tsv
+    └── average_annotations/{genome}/{feature}/{sample}_{strand}.tsv
+```
+
+**Resource-intensive rules to monitor:**
+- `map_reads` - minimap2 alignment (hours for large datasets)
+- `perbase_error` - full BAM processing per strand
+- `annotate_features` - feature annotation with chunk-based memory management
