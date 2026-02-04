@@ -394,3 +394,37 @@ benchmarks/
 - `map_reads` - minimap2 alignment (hours for large datasets)
 - `perbase_error` - full BAM processing per strand
 - `annotate_features` - feature annotation with chunk-based memory management
+
+### Genome-Specific Rules Generation (Feb 2026)
+
+The `split_perbase_by_chr` rule needs to declare all chromosome output files at DAG build time, but different genomes have different chromosome sets. Snakemake's output blocks are evaluated at parse time before wildcards are resolved, so `CHROMOSOMES[wildcards.genome]` cannot be used in output declarations (unlike input functions like `get_density_chr_files`).
+
+**Problem**: A generic rule with `{genome}` wildcard cannot dynamically determine its outputs based on the genome.
+
+**Solution: Per-genome rule generation**
+
+CONFIG.sh now generates `genome_specific_rules.smk` in the base directory (not tracked by git) containing one `split_perbase_by_chr_{genome}` rule per genome:
+
+```python
+# Auto-generated in genome_specific_rules.smk
+rule split_perbase_by_chr_chicken_v23:
+    input:
+        error="data/perbase_error/chicken.v23/{raw_sample}_{strand}.txt.gz"
+    output:
+        [wrap_output("perbase_error_by_chr", f) for f in
+         expand("data/perbase_error_by_chr/chicken.v23/{{raw_sample}}_{{strand}}/{{raw_sample}}_{{strand}}_{chr}.txt.gz",
+                chr=CHROMOSOMES["chicken.v23"])]
+    # ... shell section with genome hardcoded
+```
+
+**Key points:**
+1. Each genome gets its own rule with the genome name hardcoded (not a wildcard)
+2. Rule names use underscores instead of dots: `split_perbase_by_chr_chicken_v23` (dots replaced with `_`)
+3. The chromosome list is specific to each genome from CHROMOSOMES dict
+4. `genome_specific_rules.smk` is included by the Snakefile and regenerated each time CONFIG.sh runs
+5. The generic `split_perbase_by_chr` rule was removed from `phase2_perbase_error.smk`
+
+**Why not other approaches:**
+- **Input functions for outputs**: Not supported by Snakemake - outputs must be determinable at parse time
+- **ALL_CHROMOSOMES union**: Fails if genomes have different chromosome sets (missing files cause errors)
+- **Marker file + passthrough rule**: Adds complexity with extra rules that just verify files exist
