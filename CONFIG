@@ -1,29 +1,24 @@
 #Genomes, place in resources/genomes/
-^g	chicken.v23.fa
+^g	test_genome.fa
 
 #Features to annotate, place in resources/features/
-#^      bed file   --n-windows  --window-size
-^f	chicken.v23.APR.bed	1000	10
-^f	chicken.v23.DR.bed	1000	10
-^f	chicken.v23.G4.bed	1000	10
-^f	chicken.v23.IR.bed	1000	10
-^f	chicken.v23.STR.bed	1000	10
-^f	chicken.v23.TRI.bed	1000	10
-^f	chicken.v23.Z.bed	1000	10
+#^f	bed file	n_windows	window_size
+^f	g4Discovery.bed	1000	10
 
 # Window size
 ^w	1000000
-^w	100000
 ^w	10000
 
 #Significance threshold level, 1 is p <= 0.05,  2 is p <= 0.01,  3 is p <= 0.001,  4 is p <= 0.0001.
 ^s	2
 
 #Relationships between files
-#^           Sample                                  Treatment                                             Control
-^r	Chicken_Fibroblast_DF-1-2	Chicken_Fibroblast_DF-1_PDAL-Seq_0mM-2.fastq.gz	Chicken_Fibroblast_DF-1_PDAL-Seq_20mM-2.fastq.gz
+#^    Sample          Treatment                 Control
+^r	Hsap_HG002_LCL	Hsap_HG002_LCL_Mn04.bam	Hsap_HG002_LCL_CTRL.bam
 
 # Temporary intermediate files (deleted after downstream rules complete)
+# Remove these lines to keep all intermediate files
+^t	data/aligned_reads
 ^t	data/bg
 ^t	data/bw
 ^t	data/windows

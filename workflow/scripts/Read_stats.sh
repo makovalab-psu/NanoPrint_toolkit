@@ -8,16 +8,16 @@
 # Usage function
 usage() {
     cat << EOF
-Usage: $(basename "$0") -i <input.fastq.gz|input.bam> -o <output.txt> [-T tmpdir]
+Usage: $(basename "$0") -i <input.fastq.gz|input.bam> -o <output.txt>
 
-Calculate read statistics from FASTQ or BAM files.
+Calculate read statistics from FASTQ or BAM files using streaming mode.
+Memory-efficient: uses O(1) memory regardless of input file size.
 
 Required arguments:
     -i    Input file (*.fastq.gz or *.bam)
     -o    Output file (tab-delimited)
 
 Optional arguments:
-    -T    Temporary directory (default: same directory as output)
     -h    Show this help message
 
 Input formats:
@@ -41,13 +41,11 @@ EOF
 # Parse arguments
 INPUT=""
 OUTPUT=""
-TMP_DIR=""
 
-while getopts "i:o:T:h" opt; do
+while getopts "i:o:h" opt; do
     case $opt in
         i) INPUT="$OPTARG" ;;
         o) OUTPUT="$OPTARG" ;;
-        T) TMP_DIR="$OPTARG" ;;
         h) usage ;;
         *) usage ;;
     esac
@@ -90,28 +88,24 @@ echo "Input file: $INPUT"
 echo "File type: $FILE_TYPE"
 echo "File prefix: $FILE_PREFIX"
 
-# Get output directory
+# Get output directory and create it
 OUT_DIR=$(dirname "$OUTPUT")
 if [[ -z "$OUT_DIR" || "$OUT_DIR" == "." ]]; then
     OUT_DIR="$(pwd)"
 fi
 mkdir -p "$OUT_DIR"
 
-# Set temp directory (default: in output directory)
-if [[ -z "$TMP_DIR" ]]; then
-    TMP_DIR="${OUT_DIR}/tmp_stats_$$"
-fi
-mkdir -p "$TMP_DIR"
+echo "Calculating read statistics (streaming mode)..."
 
-# Temp file for length and quality data
-LENGTH_QUAL="${TMP_DIR}/length_qual.txt"
+# Memory-efficient streaming approach:
+# - Use length histogram (array indexed by length) instead of storing all values
+# - Use quality histogram (binned to 0.1 precision) for Q50
+# - Single pass through data, O(1) memory regardless of file size
 
-echo "Extracting read lengths and qualities..."
-
-# Extract sequence lengths and mean quality scores
+# Extract and compute statistics in a single streaming pass
 if [[ "$FILE_TYPE" == "fastq" ]]; then
     # FASTQ format: 4 lines per read (header, seq, +, qual)
-    gunzip -c "$INPUT" | awk '
+    STATS=$(gunzip -c "$INPUT" | awk '
     BEGIN {
         OFS = "\t"
         # Create lookup array for ASCII to integer conversion
@@ -119,29 +113,82 @@ if [[ "$FILE_TYPE" == "fastq" ]]; then
             ord[sprintf("%c", n)] = n
         }
     }
-    NR % 4 == 2 { 
+    NR % 4 == 2 {
         # Sequence line - get length
         len = length($0)
-        seq = $0
     }
     NR % 4 == 0 {
         # Quality line - calculate mean Phred score
         qual_str = $0
-        sum_phred = 0
         qual_len = length(qual_str)
+        sum_error = 0
         for (i = 1; i <= qual_len; i++) {
             char = substr(qual_str, i, 1)
             phred = ord[char] - 33
             sum_error += 10^(-phred/10)
         }
-        mean_error = (qual_len > 0) ?  sum_error / qual_len : 0
+        mean_error = (qual_len > 0) ? sum_error / qual_len : 1
         mean_phred = -10 * log(mean_error)/log(10)
-        print len, mean_phred
+
+        # Accumulate into histograms
+        len_hist[len] += len        # Total bases at this length
+        len_count[len]++            # Count of reads at this length
+
+        # Bin quality to 0.1 precision (multiply by 10, round)
+        qual_bin = int(mean_phred * 10 + 0.5)
+        qual_hist[qual_bin] += len  # Weight by read length (bases)
+
+        total_bp += len
+        read_count++
     }
-    ' > "$LENGTH_QUAL"
+    END {
+        if (read_count == 0) {
+            print "ERROR:0:0:0:0"
+            exit
+        }
+
+        # Find N50: traverse lengths from high to low
+        half_bp = total_bp / 2
+        cumsum = 0
+        n50 = 0
+        # Find max length for iteration
+        max_len = 0
+        for (l in len_hist) {
+            if (l > max_len) max_len = l
+        }
+        for (l = max_len; l >= 1; l--) {
+            if (l in len_hist) {
+                cumsum += len_hist[l]
+                if (cumsum >= half_bp) {
+                    n50 = l
+                    break
+                }
+            }
+        }
+
+        # Find Q50: traverse quality bins from high to low
+        cumsum = 0
+        q50 = 0
+        max_qual = 0
+        for (q in qual_hist) {
+            if (q > max_qual) max_qual = q
+        }
+        for (q = max_qual; q >= 0; q--) {
+            if (q in qual_hist) {
+                cumsum += qual_hist[q]
+                if (cumsum >= half_bp) {
+                    q50 = q / 10.0  # Convert back from bin
+                    break
+                }
+            }
+        }
+
+        print total_bp ":" read_count ":" n50 ":" q50
+    }
+    ')
 elif [[ "$FILE_TYPE" == "bam" ]]; then
     # BAM format: use samtools to extract
-    samtools view "$INPUT" | awk '
+    STATS=$(samtools view "$INPUT" | awk '
     BEGIN {
         OFS = "\t"
         # Create lookup array for ASCII to integer conversion
@@ -153,55 +200,84 @@ elif [[ "$FILE_TYPE" == "bam" ]]; then
         # Column 10 = sequence, Column 11 = quality
         len = length($10)
         qual_str = $11
-        sum_phred = 0
         qual_len = length(qual_str)
+        sum_error = 0
         for (i = 1; i <= qual_len; i++) {
             char = substr(qual_str, i, 1)
             phred = ord[char] - 33
             sum_error += 10^(-phred/10)
         }
-        mean_error = (qual_len > 0) ?  sum_error / qual_len : 0
+        mean_error = (qual_len > 0) ? sum_error / qual_len : 1
         mean_phred = -10 * log(mean_error)/log(10)
-        print len, mean_phred
+
+        # Accumulate into histograms
+        len_hist[len] += len
+        len_count[len]++
+        qual_bin = int(mean_phred * 10 + 0.5)
+        qual_hist[qual_bin] += len
+
+        total_bp += len
+        read_count++
     }
-    ' > "$LENGTH_QUAL"
+    END {
+        if (read_count == 0) {
+            print "ERROR:0:0:0:0"
+            exit
+        }
+
+        half_bp = total_bp / 2
+        cumsum = 0
+        n50 = 0
+        max_len = 0
+        for (l in len_hist) {
+            if (l > max_len) max_len = l
+        }
+        for (l = max_len; l >= 1; l--) {
+            if (l in len_hist) {
+                cumsum += len_hist[l]
+                if (cumsum >= half_bp) {
+                    n50 = l
+                    break
+                }
+            }
+        }
+
+        cumsum = 0
+        q50 = 0
+        max_qual = 0
+        for (q in qual_hist) {
+            if (q > max_qual) max_qual = q
+        }
+        for (q = max_qual; q >= 0; q--) {
+            if (q in qual_hist) {
+                cumsum += qual_hist[q]
+                if (cumsum >= half_bp) {
+                    q50 = q / 10.0
+                    break
+                }
+            }
+        }
+
+        print total_bp ":" read_count ":" n50 ":" q50
+    }
+    ')
 fi
 
-READ_COUNT=$(wc -l < "$LENGTH_QUAL" | tr -d ' ')
+# Parse results
+TOTAL_BP=$(echo "$STATS" | cut -d: -f1)
+READ_COUNT=$(echo "$STATS" | cut -d: -f2)
+N50=$(echo "$STATS" | cut -d: -f3)
+Q50=$(echo "$STATS" | cut -d: -f4)
+
 echo "Total reads: $READ_COUNT"
 
-if [[ "$READ_COUNT" -eq 0 ]]; then
+if [[ "$READ_COUNT" -eq 0 || "$STATS" == ERROR* ]]; then
     echo "Error: No reads found in input file" >&2
     exit 1
 fi
 
-echo "Calculating N50..."
-# Calculate total bases and N50
-# Sort by length descending, accumulate until 50% of total bases
-TOTAL_BP=$(awk '{sum += $1} END {print sum}' "$LENGTH_QUAL")
-N50=$(sort -t$'\t' -k1,1 -rn "$LENGTH_QUAL" | awk -v total="$TOTAL_BP" '
-BEGIN { cumsum = 0; half = total / 2 }
-{
-    cumsum += $1
-    if (cumsum >= half) {
-        print $1
-        exit
-    }
-}
-')
-
-echo "Calculating Q50..."
-# Calculate Q50: sort by mean quality descending, find quality at 50% of bases
-Q50=$(sort -t$'\t' -k2,2 -rn "$LENGTH_QUAL" | awk -v total="$LENGTH_QUAL" '
-BEGIN { cumsum = 0; half = total / 2 }
-{
-    cumsum += 1
-    if (cumsum >= half) {
-        print $2
-        exit
-    }
-}
-')
+echo "N50: $N50"
+echo "Q50: $Q50"
 
 # Calculate summary statistics
 GIGA_BP=$(echo "scale=4; $TOTAL_BP / 1000000000" | bc)
@@ -219,13 +295,5 @@ echo "=== Read Statistics ==="
 cat "$OUTPUT" | column -t
 echo ""
 echo "Done: $OUTPUT"
-
-# Cleanup function
-cleanup() {
-    if [[ -d "$TMP_DIR" ]]; then
-        rm -rf "$TMP_DIR"
-    fi
-}
-trap cleanup EXIT
 
 

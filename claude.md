@@ -25,6 +25,7 @@ The pipeline is configured via a CONFIG file with prefix notation:
 | `^w` | Window size for density calculation | `^w 1000000` |
 | `^s` | Significance threshold (1-4) | `^s 2` |
 | `^r` | Relationship: Sample, Treatment, Control | `^r SampleName Treatment.bam Control.bam` |
+| `^t` | Temporary directory (auto-deleted) | `^t data/aligned_reads` |
 
 Extensions are automatically stripped from all file values.
 
@@ -428,3 +429,61 @@ rule split_perbase_by_chr_chicken_v23:
 - **Input functions for outputs**: Not supported by Snakemake - outputs must be determinable at parse time
 - **ALL_CHROMOSOMES union**: Fails if genomes have different chromosome sets (missing files cause errors)
 - **Marker file + passthrough rule**: Adds complexity with extra rules that just verify files exist
+
+### Temporary File Management (Feb 2026)
+
+The workflow generates many intermediate files that can consume significant disk space. A configurable temporary file system was implemented using Snakemake's `temp()` wrapper.
+
+**CONFIG syntax:**
+
+Add `^t` prefix lines to mark directories as temporary:
+```
+^t  data/aligned_reads
+^t  data/bg
+^t  data/bw
+^t  data/windows
+^t  data/annotations
+^t  data/annotations_merged
+```
+
+**How it works:**
+
+1. **CONFIG.sh parses `^t` lines** and generates:
+   - `TEMP_DIRS` list in Snakefile
+   - `TEMP_OUTPUTS` dict mapping output keys to boolean
+   - `wrap_output(key, path)` helper function
+
+2. **Rule files use `wrap_output()`** to conditionally wrap outputs:
+   ```python
+   output:
+       bam=wrap_output("aligned_reads_bam", "data/aligned_reads/{genome}/{raw_sample}.bam")
+   ```
+
+3. **Snakemake's `temp()`** automatically deletes files after all downstream rules complete
+
+**Configurable behavior:**
+- Adding a `^t` line marks that directory's files as temporary
+- Removing the `^t` line keeps those files (no deletion)
+- No `^t` lines = all intermediate files kept (original behavior)
+
+**Output keys mapped to directories:**
+
+| Key | Directory | Rule(s) |
+|-----|-----------|---------|
+| `aligned_reads_bam` | `data/aligned_reads` | `map_reads` |
+| `perbase_error_by_chr` | `data/perbase_error_by_chr` | `split_perbase_by_chr` |
+| `reactivity` | `data/reactivity` | `calculate_reactivity` |
+| `bg` | `data/bg` | `reactivity_to_bedgraph` |
+| `windows` | `data/windows` | `reactivity_density` |
+| `bw` | `data/bw` | `bedgraph_to_bigwig` |
+| `annotations` | `data/annotations` | `annotate_features` |
+| `annotations_merged` | `data/annotations_merged` | `merge_annotations` |
+
+**Protected files (never temporary):**
+- `data/filtered_alignments/` - Quality-filtered BAMs (user-requested)
+- `data/perbase_error/` - Final per-base error (non-split)
+- `data/bw_merged/` - Final merged bigWig
+- `data/windows_merged/` - Final merged density
+- `data/annotations_averaged/` - Final averaged annotations
+- `tables/` - All QC tables
+- `logs/` and `benchmarks/` - Always preserved
