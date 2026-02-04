@@ -24,6 +24,7 @@ claude/
 tmp_*/
 
 # Snakemake
+CONFIG
 .snakemake/
 Snakefile
 genome_specific_rules.smk
