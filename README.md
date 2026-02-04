@@ -1412,3 +1412,31 @@ After modifying CONFIG, regenerate the Snakefile:
 ```bash
 ./workflow/scripts/CONFIG.sh -i CONFIG -o Snakefile
 ```
+
+## Genome-Specific Rules
+
+The pipeline supports multiple genomes with different chromosome sets. Because Snakemake requires all output files to be declared at parse time (before wildcards are resolved), rules that split files by chromosome cannot use a generic `{genome}` wildcard to determine the chromosome list dynamically.
+
+### How It Works
+
+When you run `CONFIG.sh`, it generates two files:
+1. **Snakefile** - The main workflow file with configuration and includes
+2. **genome_specific_rules.smk** - Auto-generated rules for chromosome splitting, one per genome
+
+For example, with `chicken.v23` genome, CONFIG.sh generates:
+```python
+rule split_perbase_by_chr_chicken_v23:
+    input:
+        error="data/perbase_error/chicken.v23/{raw_sample}_{strand}.txt.gz"
+    output:
+        # Expands to all 41 chicken chromosomes
+        [wrap_output("perbase_error_by_chr", f) for f in
+         expand("data/perbase_error_by_chr/chicken.v23/..._{chr}.txt.gz",
+                chr=["chr1", "chr2", ..., "chrZ", "mito"])]
+```
+
+### Important Notes
+
+- **Always regenerate after CONFIG changes**: Run `./workflow/scripts/CONFIG.sh` whenever you modify the CONFIG file
+- **genome_specific_rules.smk is not tracked by git**: This file is generated fresh for each implementation and should not be committed
+- **Multi-genome support**: Each genome in CONFIG gets its own splitting rule with the correct chromosome list

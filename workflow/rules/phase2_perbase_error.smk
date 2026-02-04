@@ -28,47 +28,7 @@ rule perbase_error:
         """
 
 
-rule split_perbase_by_chr:
-    """Split per-base error file by chromosome for parallelization.
-
-    Outputs are explicitly declared using expand() with CHROMOSOMES from the Snakefile.
-    This allows Snakemake to build the DAG before execution.
-    """
-    input:
-        error="data/perbase_error/{genome}/{raw_sample}_{strand}.txt.gz"
-    output:
-        [wrap_output("perbase_error_by_chr", f) for f in
-         expand("data/perbase_error_by_chr/{{genome}}/{{raw_sample}}_{{strand}}/{{raw_sample}}_{{strand}}_{chr}.txt.gz",
-                chr=CHROMOSOMES["test_genome"])]
-    params:
-        outdir="data/perbase_error_by_chr/{genome}/{raw_sample}_{strand}"
-    log:
-        "logs/split_perbase_by_chr/{genome}/{raw_sample}_{strand}.log"
-    benchmark:
-        "benchmarks/phase2/split_perbase_by_chr/{genome}/{raw_sample}_{strand}.tsv"
-    wildcard_constraints:
-        strand="for|rev"
-    shell:
-        """
-        mkdir -p {params.outdir}
-        workflow/scripts/Split_by_chr.sh \
-            -i {input.error} \
-            2>&1 | tee {log}
-
-        # Move split files to output directory
-        mv data/perbase_error/{wildcards.genome}/{wildcards.raw_sample}_{wildcards.strand}_*.txt.gz {params.outdir}/
-
-        # Verify expected outputs exist
-        for f in {output}; do
-            if [[ ! -f "$f" ]]; then
-                echo "ERROR: Expected output not created: $f" >&2
-                exit 1
-            fi
-        done
-
-        echo "Successfully created chromosome files:" | tee -a {log}
-        ls -la {params.outdir}/*.txt.gz | tee -a {log}
-        """
+# Note: split_perbase_by_chr rules are generated per-genome in genome_specific_rules.smk
 
 
 rule correlation:

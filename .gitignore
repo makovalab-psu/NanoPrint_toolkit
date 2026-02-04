@@ -26,6 +26,7 @@ tmp_*/
 # Snakemake
 .snakemake/
 Snakefile
+genome_specific_rules.smk
 logs/
 tables/
 dag.pdf

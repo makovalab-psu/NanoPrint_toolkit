@@ -360,6 +360,7 @@ include: "workflow/rules/phase2_perbase_error.smk"
 include: "workflow/rules/phase3_reactivity.smk"
 include: "workflow/rules/phase4_analysis.smk"
 include: "workflow/rules/phase5_annotate_features.smk"
+include: "genome_specific_rules.smk"
 
 # ============================================================================
 # Target rule
@@ -393,6 +394,69 @@ rule all:
 
 EOF
 
+# ============================================================================
+# Generate genome_specific_rules.smk
+# ============================================================================
+GENOME_RULES_FILE="genome_specific_rules.smk"
+
+cat > "$GENOME_RULES_FILE" << 'EOF'
+# ============================================================================
+# Auto-generated genome-specific rules by CONFIG.sh
+# Do not edit manually - regenerate from CONFIG file
+# ============================================================================
+
+EOF
+
+# Generate a split_perbase_by_chr rule for each genome
+for i in "${!GENOME_CHR_NAMES[@]}"; do
+    genome="${GENOME_CHR_NAMES[$i]}"
+    chrs_array=(${GENOME_CHR_VALUES[$i]})
+    chrs_python=$(python_list "${chrs_array[@]}")
+
+    cat >> "$GENOME_RULES_FILE" << EOF
+rule split_perbase_by_chr_${genome//./_}:
+    """Split per-base error file by chromosome for ${genome}."""
+    input:
+        error="data/perbase_error/${genome}/{raw_sample}_{strand}.txt.gz"
+    output:
+        [wrap_output("perbase_error_by_chr", f) for f in
+         expand("data/perbase_error_by_chr/${genome}/{{raw_sample}}_{{strand}}/{{raw_sample}}_{{strand}}_{chr}.txt.gz",
+                chr=${chrs_python})]
+    params:
+        outdir="data/perbase_error_by_chr/${genome}/{raw_sample}_{strand}"
+    log:
+        "logs/split_perbase_by_chr/${genome}/{raw_sample}_{strand}.log"
+    benchmark:
+        "benchmarks/phase2/split_perbase_by_chr/${genome}/{raw_sample}_{strand}.tsv"
+    wildcard_constraints:
+        strand="for|rev"
+    shell:
+        """
+        mkdir -p {params.outdir}
+        workflow/scripts/Split_by_chr.sh \\
+            -i {input.error} \\
+            2>&1 | tee {log}
+
+        # Move split files to output directory
+        mv data/perbase_error/${genome}/{wildcards.raw_sample}_{wildcards.strand}_*.txt.gz {params.outdir}/
+
+        # Verify expected outputs exist
+        for f in {output}; do
+            if [[ ! -f "\$f" ]]; then
+                echo "ERROR: Expected output not created: \$f" >&2
+                exit 1
+            fi
+        done
+
+        echo "Successfully created chromosome files:" | tee -a {log}
+        ls -la {params.outdir}/*.txt.gz | tee -a {log}
+        """
+
+
+EOF
+done
+
+echo "Generated $GENOME_RULES_FILE"
 echo "Generated $OUTPUT_FILE from $CONFIG_FILE"
 echo ""
 echo "Summary:"
