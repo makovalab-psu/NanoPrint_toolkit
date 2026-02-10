@@ -205,7 +205,7 @@ def split_bed_into_bins(filepath, out_prefix, chunk_size):
     """Split BED file into bins by reference point."""
     os.makedirs(out_prefix, exist_ok=True)
     handles = {}
-    with open(filepath, 'r') as f:
+    with open_file(filepath) as f:
         for line in f:
             fields = line.strip().split('\t')
             if len(fields) < 3:

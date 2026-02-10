@@ -16,26 +16,11 @@ rule split_features_by_chr:
         "benchmarks/phase5/split_features_by_chr/{feature}.tsv"
     shell:
         """
-        mkdir -p {params.outdir}
-        workflow/scripts/Split_by_chr.sh \
+        python3 workflow/scripts/Split_by_chr.sh \
             -i {input.bed} \
+            -d {params.outdir} \
             2>&1 | tee {log}
-        # Move split files to output directory
-        mv resources/features/{wildcards.feature}_*.bed {params.outdir}/
         touch {output.done}
-        """
-
-
-rule feature_chr_file:
-    """Declare individual chromosome BED files produced by split_features_by_chr."""
-    input:
-        done="resources/features/{feature}_by_chr/.done"
-    output:
-        file="resources/features/{feature}_by_chr/{feature}_{chr}.bed"
-    shell:
-        """
-        # File was created by split_features_by_chr, just verify it exists
-        test -f {output.file}
         """
 
 
@@ -62,7 +47,7 @@ def get_annotate_inputs(wildcards):
     treatment = get_treatment(wildcards.sample)
     control = get_control(wildcards.sample)
     return {
-        "bed": f"resources/features/{wildcards.feature}_by_chr/{wildcards.feature}_{wildcards.chr}.bed",
+        "feature_done": f"resources/features/{wildcards.feature}_by_chr/.done",
         "treatment": f"data/perbase_error_by_chr/{wildcards.genome}/{treatment}_{wildcards.strand}/{treatment}_{wildcards.strand}_{wildcards.chr}.txt.gz",
         "control": f"data/perbase_error_by_chr/{wildcards.genome}/{control}_{wildcards.strand}/{control}_{wildcards.strand}_{wildcards.chr}.txt.gz",
         "reactivity": f"data/reactivity/{wildcards.genome}/{wildcards.sample}_{wildcards.strand}_{wildcards.chr}.txt.gz"
@@ -77,6 +62,7 @@ rule annotate_features:
     output:
         annotation=wrap_output("annotations", "data/annotations/{genome}/{feature}/{sample}_{strand}_{chr}.txt.gz")
     params:
+        bed="resources/features/{feature}_by_chr/{feature}_{chr}.bed.gz",
         n_windows=lambda wildcards: FEATURE_PARAMS.get(wildcards.feature, (1000, 10))[0],
         window_size=lambda wildcards: FEATURE_PARAMS.get(wildcards.feature, (1000, 10))[1]
     log:
@@ -88,7 +74,7 @@ rule annotate_features:
     shell:
         """
         workflow/scripts/annotate_features.sh \
-            -b {input.bed} \
+            -b {params.bed} \
             -t {input.treatment} \
             -c {input.control} \
             -r {input.reactivity} \

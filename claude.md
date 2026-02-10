@@ -171,7 +171,7 @@ The original workflow used Snakemake checkpoints (`split_perbase_by_chr`, `split
 - `MissingInputException` errors when checkpoint outputs didn't match expected inputs
 - Fragile dependency resolution
 
-**Solution: Marker file pattern**
+**Solution: Marker file + direct dependency pattern**
 
 Instead of checkpoints, chromosome wildcards are now hardcoded at CONFIG.sh generation time:
 
@@ -181,28 +181,31 @@ Instead of checkpoints, chromosome wildcards are now hardcoded at CONFIG.sh gene
 
 2. **Split rules output marker files**:
    ```python
-   rule split_perbase_by_chr:
+   rule split_features_by_chr:
        output:
-           done="data/perbase_error_by_chr/{genome}/{raw_sample}_{strand}/.done"
+           done="resources/features/{feature}_by_chr/.done"
        shell:
            """
-           # ... split files ...
+           python3 workflow/scripts/Split_by_chr.sh ...
            touch {output.done}
            """
    ```
 
-3. **Passthrough rules declare individual files**:
+3. **Downstream rules depend on `.done` marker, reference split files via `params`**:
    ```python
-   rule perbase_chr_file:
+   rule annotate_features:
        input:
-           done="data/perbase_error_by_chr/{genome}/{raw_sample}_{strand}/.done"
-       output:
-           file="data/perbase_error_by_chr/{genome}/{raw_sample}_{strand}/{raw_sample}_{strand}_{chr}.txt"
+           feature_done="resources/features/{feature}_by_chr/.done",
+           ...
+       params:
+           bed="resources/features/{feature}_by_chr/{feature}_{chr}.bed.gz"
        shell:
-           "test -f {output.file}"
+           "annotate_features.sh -b {params.bed} ..."
    ```
 
-This pattern establishes the dependency chain: `split rule (.done)` → `passthrough rule (.txt)` → `downstream rules`
+**Important**: Do NOT use "passthrough rules" that declare split files as `output` and just run `test -f`. Snakemake 8.x deletes output files before executing a rule, so the `test -f` will always fail. Instead, split files must be referenced via `params` (not tracked by Snakemake) with `.done` as the real dependency.
+
+For phase 2 (perbase error), per-genome split rules in `genome_specific_rules.smk` declare all chromosome files as direct outputs, avoiding this issue entirely.
 
 ### Bash 3.2 Compatibility
 
@@ -429,6 +432,54 @@ rule split_perbase_by_chr_chicken_v23:
 - **Input functions for outputs**: Not supported by Snakemake - outputs must be determinable at parse time
 - **ALL_CHROMOSOMES union**: Fails if genomes have different chromosome sets (missing files cause errors)
 - **Marker file + passthrough rule**: Adds complexity with extra rules that just verify files exist
+
+### Split_by_chr.sh Rewritten in Python (Feb 2026)
+
+The chromosome-splitting script was rewritten from bash/awk to pure Python after two classes of bugs:
+
+**Bug 1: macOS BSD awk silently drops output files** during parallel Snakemake execution. Affects both pipe-based (`print | "gzip > file"`) and direct file redirection (`print > file`). Non-deterministic — different chromosomes fail on different runs.
+
+**Bug 2: Snakemake 8.x deletes output files before executing a rule.** The original `feature_chr_file` passthrough rule declared split files as `output` and ran `test -f` to verify them. Snakemake deleted the file before running the test, so it always failed. This was the actual cause of the persistent `test -f` failures — not filesystem sync issues.
+
+**Split_by_chr.sh solution:**
+
+The script (`workflow/scripts/Split_by_chr.sh`) now has a `#!/usr/bin/env python3` shebang and uses only Python — no awk, no bash `gzip`, no shell loops. It writes gzipped output directly via `gzip.open()`.
+
+```python
+# Core logic — single pass, writes .gz files directly
+opener = gzip.open if compressed else open
+files = {}
+with opener(input_path, "rt") as fh:
+    for line in fh:
+        chr_name = line.split("\t", 1)[0]
+        if chr_name not in files:
+            files[chr_name] = gzip.open(f"{out_prefix}{chr_name}.{ext}.gz", "wt")
+        files[chr_name].write(line)
+for f in files.values():
+    f.flush()
+    f.close()
+```
+
+**Snakemake rule solution:**
+
+Removed the `feature_chr_file` passthrough rule entirely. `annotate_features` now depends on `.done` as input and references the `.bed.gz` file via `params` (not tracked by Snakemake, so it won't be deleted):
+
+```python
+rule annotate_features:
+    input:
+        feature_done="resources/features/{feature}_by_chr/.done",  # dependency
+        ...
+    params:
+        bed="resources/features/{feature}_by_chr/{feature}_{chr}.bed.gz",  # not managed by Snakemake
+```
+
+**Key points:**
+- All file I/O is Python — no awk or bash subprocesses involved
+- `gzip.open("wt")` writes compressed output directly (no intermediate uncompressed files)
+- Handles unsorted input (non-contiguous chromosome blocks) correctly
+- Output directory is cleaned before splitting to prevent stale file interference
+- Same CLI interface (`-i`, `-d`, `-h`) — Snakemake rules call with `python3 workflow/scripts/Split_by_chr.sh`
+- **Never use passthrough rules** (declare file as output + `test -f`) in Snakemake 8.x — use `.done` marker + `params` instead
 
 ### Temporary File Management (Feb 2026)
 

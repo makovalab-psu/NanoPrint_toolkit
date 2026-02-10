@@ -432,13 +432,10 @@ rule split_perbase_by_chr_${genome//./_}:
         strand="for|rev"
     shell:
         """
-        mkdir -p {params.outdir}
-        workflow/scripts/Split_by_chr.sh \\
+        python3 workflow/scripts/Split_by_chr.sh \\
             -i {input.error} \\
+            -d {params.outdir} \\
             2>&1 | tee {log}
-
-        # Move split files to output directory
-        mv data/perbase_error/${genome}/{wildcards.raw_sample}_{wildcards.strand}_*.txt.gz {params.outdir}/
 
         # Verify expected outputs exist
         for f in {output}; do
