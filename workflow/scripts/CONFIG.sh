@@ -51,6 +51,8 @@ declare -a SAMPLES=()
 declare -a TREATMENTS=()
 declare -a CONTROLS=()
 declare -a TEMP_DIRS=()
+IGV_BAM="false"
+IGV_BIGWIG="false"
 
 # Function to strip file extension
 strip_ext() {
@@ -77,9 +79,9 @@ while IFS= read -r line || [[ -n "$line" ]]; do
 
     # Handle prefix lines (^X followed by tab-separated values)
     if [[ "$line" =~ ^\^ ]]; then
-        prefix="${line:0:2}"
+        prefix="${line%%[[:space:]]*}"
         # Get values after prefix (tab-separated)
-        values="${line:2}"
+        values="${line#"$prefix"}"
         # Trim leading whitespace/tabs
         values="${values#"${values%%[![:space:]]*}"}"
 
@@ -133,6 +135,12 @@ while IFS= read -r line || [[ -n "$line" ]]; do
                 value="${value%/}"
                 TEMP_DIRS+=("$value")
                 ;;
+            "^igv-bam")
+                IGV_BAM="true"
+                ;;
+            "^igv-bigwig")
+                IGV_BIGWIG="true"
+                ;;
         esac
     fi
 done < "$CONFIG_FILE"
@@ -185,31 +193,33 @@ get_genome_chrs() {
 declare -a FEATURE_CHR_NAMES=()   # feature names (parallel to FEATURE_CHR_VALUES)
 declare -a FEATURE_CHR_VALUES=()  # space-separated chromosome lists
 
-for feature in "${FEATURES[@]}"; do
-    bed_file="resources/features/${feature}.bed"
-    if [[ ! -f "$bed_file" ]]; then
-        echo "Error: Feature BED file not found: $bed_file" >&2
-        exit 1
-    fi
-
-    # Get genome chromosomes (using first genome as reference)
-    get_genome_chrs "${GENOMES[0]}"
-    genome_chrs="$RESULT"
-
-    # Get unique chromosomes from BED file, filter to those in genome
-    bed_chrs=$(cut -f1 "$bed_file" | sort -u)
-    filtered_chrs=""
-    for chr in $bed_chrs; do
-        # Check if chr is in genome_chrs (space-delimited search)
-        if [[ " $genome_chrs " == *" $chr "* ]]; then
-            filtered_chrs="$filtered_chrs $chr"
+if [[ ${#FEATURES[@]} -gt 0 ]]; then
+    for feature in "${FEATURES[@]}"; do
+        bed_file="resources/features/${feature}.bed"
+        if [[ ! -f "$bed_file" ]]; then
+            echo "Error: Feature BED file not found: $bed_file" >&2
+            exit 1
         fi
+
+        # Get genome chromosomes (using first genome as reference)
+        get_genome_chrs "${GENOMES[0]}"
+        genome_chrs="$RESULT"
+
+        # Get unique chromosomes from BED file, filter to those in genome
+        bed_chrs=$(cut -f1 "$bed_file" | sort -u)
+        filtered_chrs=""
+        for chr in $bed_chrs; do
+            # Check if chr is in genome_chrs (space-delimited search)
+            if [[ " $genome_chrs " == *" $chr "* ]]; then
+                filtered_chrs="$filtered_chrs $chr"
+            fi
+        done
+        # Trim leading space
+        filtered_chrs="${filtered_chrs# }"
+        FEATURE_CHR_NAMES+=("$feature")
+        FEATURE_CHR_VALUES+=("$filtered_chrs")
     done
-    # Trim leading space
-    filtered_chrs="${filtered_chrs# }"
-    FEATURE_CHR_NAMES+=("$feature")
-    FEATURE_CHR_VALUES+=("$filtered_chrs")
-done
+fi
 
 # Helper to get chromosomes for a feature (returns via RESULT variable)
 get_feature_chrs() {
@@ -225,6 +235,10 @@ get_feature_chrs() {
 
 # Helper function to format array as Python list
 python_list() {
+    if [[ $# -eq 0 ]]; then
+        echo "[]"
+        return
+    fi
     local arr=("$@")
     local result="["
     local first=true
@@ -261,20 +275,34 @@ EOF
     echo "GENOMES = $(python_list "${GENOMES[@]}")"
     echo ""
     echo "# Features for annotation"
-    echo "FEATURES = $(python_list "${FEATURES[@]}")"
+    if [[ ${#FEATURES[@]} -gt 0 ]]; then
+        echo "FEATURES = $(python_list "${FEATURES[@]}")"
+    else
+        echo "FEATURES = []"
+    fi
     echo ""
     echo "# Feature annotation parameters: feature -> (n_windows, window_size)"
     echo "FEATURE_PARAMS = {"
-    for i in "${!FEATURES[@]}"; do
-        echo "    \"${FEATURES[$i]}\": (${FEATURE_N_WINDOWS[$i]}, ${FEATURE_WINDOW_SIZES[$i]}),"
-    done
+    if [[ ${#FEATURES[@]} -gt 0 ]]; then
+        for i in "${!FEATURES[@]}"; do
+            echo "    \"${FEATURES[$i]}\": (${FEATURE_N_WINDOWS[$i]}, ${FEATURE_WINDOW_SIZES[$i]}),"
+        done
+    fi
     echo "}"
     echo ""
     echo "# Window sizes for density calculation"
-    echo "WINDOW_SIZES = $(python_list "${WINDOW_SIZES[@]}")"
+    if [[ ${#WINDOW_SIZES[@]} -gt 0 ]]; then
+        echo "WINDOW_SIZES = $(python_list "${WINDOW_SIZES[@]}")"
+    else
+        echo "WINDOW_SIZES = []"
+    fi
     echo ""
     echo "# Significance threshold levels"
-    echo "SIG_LEVELS = $(python_list "${SIG_LEVELS[@]}")"
+    if [[ ${#SIG_LEVELS[@]} -gt 0 ]]; then
+        echo "SIG_LEVELS = $(python_list "${SIG_LEVELS[@]}")"
+    else
+        echo "SIG_LEVELS = []"
+    fi
     echo ""
     echo "# Strand directions"
     echo "STRANDS = [\"for\", \"rev\"]"
@@ -303,11 +331,13 @@ EOF
     echo ""
     echo "# Chromosomes per feature (filtered to genome chromosomes)"
     echo "FEATURE_CHROMOSOMES = {"
-    for i in "${!FEATURE_CHR_NAMES[@]}"; do
-        feature="${FEATURE_CHR_NAMES[$i]}"
-        chrs_array=(${FEATURE_CHR_VALUES[$i]})
-        echo "    \"$feature\": $(python_list "${chrs_array[@]}"),"
-    done
+    if [[ ${#FEATURE_CHR_NAMES[@]} -gt 0 ]]; then
+        for i in "${!FEATURE_CHR_NAMES[@]}"; do
+            feature="${FEATURE_CHR_NAMES[$i]}"
+            chrs_array=(${FEATURE_CHR_VALUES[$i]})
+            echo "    \"$feature\": $(python_list "${chrs_array[@]}"),"
+        done
+    fi
     echo "}"
     echo ""
     echo "# Directories to mark as temporary (auto-deleted after downstream rules complete)"
@@ -327,6 +357,25 @@ EOF
     echo "    \"bw\": \"data/bw\" in TEMP_DIRS,"
     echo "    \"annotations\": \"data/annotations\" in TEMP_DIRS,"
     echo "    \"annotations_merged\": \"data/annotations_merged\" in TEMP_DIRS,"
+    echo "}"
+    echo ""
+    echo "# IGV export settings"
+    if [[ "$IGV_BAM" == "true" ]]; then
+        echo "IGV_BAM = True"
+    else
+        echo "IGV_BAM = False"
+    fi
+    if [[ "$IGV_BIGWIG" == "true" ]]; then
+        echo "IGV_BIGWIG = True"
+    else
+        echo "IGV_BIGWIG = False"
+    fi
+    echo "IGV_SOURCES = [\"all_alignments\", \"filtered_alignments\"]"
+    echo ""
+    echo "# Mapping from IGV source to input directory"
+    echo "IGV_SOURCE_DIRS = {"
+    echo "    \"all_alignments\": \"data/aligned_reads\","
+    echo "    \"filtered_alignments\": \"data/filtered_alignments\","
     echo "}"
     echo ""
 } >> "$OUTPUT_FILE"
@@ -360,6 +409,7 @@ include: "workflow/rules/phase2_perbase_error.smk"
 include: "workflow/rules/phase3_reactivity.smk"
 include: "workflow/rules/phase4_analysis.smk"
 include: "workflow/rules/phase5_annotate_features.smk"
+include: "workflow/rules/phase6_igv.smk"
 include: "genome_specific_rules.smk"
 
 # ============================================================================
@@ -380,6 +430,13 @@ rule all:
         expand("data/perbase_error/{genome}/{raw_sample}_{strand}.txt.gz",
                genome=GENOMES, raw_sample=RAW_SAMPLES, strand=STRANDS),
 
+        # Phase 3: Reactivity files (per chromosome)
+        [f"data/reactivity/{genome}/{sample}_{strand}_{chr}.txt.gz"
+         for genome in GENOMES
+         for sample in SAMPLES
+         for strand in STRANDS
+         for chr in CHROMOSOMES[genome]],
+
         # Phase 4: Merged bigWig files
         expand("data/bw_merged/{genome}/significance_threshold_{sig}/{sample}_{strand}.bw",
                genome=GENOMES, sig=SIG_LEVELS, sample=SAMPLES, strand=STRANDS),
@@ -391,6 +448,18 @@ rule all:
         # Phase 5: Averaged feature annotations
         expand("data/annotations_averaged/{genome}/{feature}/{sample}_{strand}.txt.gz",
                genome=GENOMES, feature=FEATURES, sample=SAMPLES, strand=STRANDS),
+
+        # Phase 6: IGV strand-split BAMs + indices
+        expand("results/igv/{igv_source}/{genome}/{raw_sample}_{strand}.bam",
+               igv_source=IGV_SOURCES, genome=GENOMES, raw_sample=RAW_SAMPLES, strand=STRANDS) +
+        expand("results/igv/{igv_source}/{genome}/{raw_sample}_{strand}.bam.bai",
+               igv_source=IGV_SOURCES, genome=GENOMES, raw_sample=RAW_SAMPLES, strand=STRANDS)
+        if IGV_BAM else [],
+
+        # Phase 6: IGV coverage bigWig files
+        expand("results/igv/{igv_source}/{genome}/{raw_sample}_{strand}.bw",
+               igv_source=IGV_SOURCES, genome=GENOMES, raw_sample=RAW_SAMPLES, strand=STRANDS)
+        if IGV_BIGWIG else [],
 
 EOF
 
@@ -437,11 +506,11 @@ rule split_perbase_by_chr_${genome//./_}:
             -d {params.outdir} \\
             2>&1 | tee {log}
 
-        # Verify expected outputs exist
+        # Create empty gzipped files for any expected chromosomes with no data
         for f in {output}; do
             if [[ ! -f "\$f" ]]; then
-                echo "ERROR: Expected output not created: \$f" >&2
-                exit 1
+                echo "No data for \$f — creating empty file" | tee -a {log}
+                echo -n | gzip > "\$f"
             fi
         done
 
@@ -458,9 +527,9 @@ echo "Generated $OUTPUT_FILE from $CONFIG_FILE"
 echo ""
 echo "Summary:"
 echo "  Genomes:        ${#GENOMES[@]} (${GENOMES[*]})"
-echo "  Features:       ${#FEATURES[@]} (${FEATURES[*]})"
-echo "  Window sizes:   ${#WINDOW_SIZES[@]} (${WINDOW_SIZES[*]})"
-echo "  Sig levels:     ${#SIG_LEVELS[@]} (${SIG_LEVELS[*]})"
+echo "  Features:       ${#FEATURES[@]}$(if [[ ${#FEATURES[@]} -gt 0 ]]; then echo " (${FEATURES[*]})"; fi)"
+echo "  Window sizes:   ${#WINDOW_SIZES[@]}$(if [[ ${#WINDOW_SIZES[@]} -gt 0 ]]; then echo " (${WINDOW_SIZES[*]})"; fi)"
+echo "  Sig levels:     ${#SIG_LEVELS[@]}$(if [[ ${#SIG_LEVELS[@]} -gt 0 ]]; then echo " (${SIG_LEVELS[*]})"; fi)"
 echo "  Relationships:  ${#SAMPLES[@]}"
 for i in "${!SAMPLES[@]}"; do
     echo "    ${SAMPLES[$i]}: ${TREATMENTS[$i]} vs ${CONTROLS[$i]}"
@@ -474,11 +543,15 @@ for i in "${!GENOME_CHR_NAMES[@]}"; do
 done
 echo ""
 echo "Chromosomes per feature (filtered to genome):"
-for i in "${!FEATURE_CHR_NAMES[@]}"; do
-    feature="${FEATURE_CHR_NAMES[$i]}"
-    chrs_array=(${FEATURE_CHR_VALUES[$i]})
-    echo "  $feature: ${#chrs_array[@]} chromosomes"
-done
+if [[ ${#FEATURE_CHR_NAMES[@]} -gt 0 ]]; then
+    for i in "${!FEATURE_CHR_NAMES[@]}"; do
+        feature="${FEATURE_CHR_NAMES[$i]}"
+        chrs_array=(${FEATURE_CHR_VALUES[$i]})
+        echo "  $feature: ${#chrs_array[@]} chromosomes"
+    done
+else
+    echo "  (none)"
+fi
 echo ""
 echo "Temporary directories:"
 if [[ ${#TEMP_DIRS[@]} -gt 0 ]]; then

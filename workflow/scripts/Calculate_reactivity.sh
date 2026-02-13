@@ -131,6 +131,13 @@ gunzip -c "$PLUS" > "$PLUS_DECOMP"
 echo "Decompressing control file..."
 gunzip -c "$MINUS" > "$MINUS_DECOMP"
 
+# If either input is empty, produce an empty output and exit
+if [[ ! -s "$PLUS_DECOMP" || ! -s "$MINUS_DECOMP" ]]; then
+    echo "One or both input files are empty — producing empty output"
+    echo -n | gzip > "$OUT"
+    exit 0
+fi
+
 # Get chromosome name from first line of treatment file
 CHR=$(head -n 1 "$PLUS_DECOMP" | cut -f1)
 echo "Chromosome: $CHR"
