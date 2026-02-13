@@ -24,3 +24,7 @@
 ^t	data/windows
 ^t	data/annotations
 ^t	data/annotations_merged
+
+#Other settings
+^igv-bam
+^igv-bigwig

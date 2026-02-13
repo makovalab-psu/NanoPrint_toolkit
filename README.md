@@ -189,6 +189,40 @@ UCSC bigWig binary format (viewable in IGV, UCSC Genome Browser, etc.)
 
 ---
 
+## IGV Strand-Split BAM Files
+
+### Description
+BAM files split by strand (forward and reverse) for IGV visualization. Generated from both raw aligned reads and quality-filtered alignments. Includes BAM indices (.bai) for random access. Enabled by adding `^igv-bam` to CONFIG.
+
+### Format
+Standard BAM format with BAM index (.bai).
+
+### Location
+```
+results/igv/all_alignments/{genome}/{raw_sample}_{strand}.bam
+results/igv/all_alignments/{genome}/{raw_sample}_{strand}.bam.bai
+results/igv/filtered_alignments/{genome}/{raw_sample}_{strand}.bam
+results/igv/filtered_alignments/{genome}/{raw_sample}_{strand}.bam.bai
+```
+
+---
+
+## IGV Coverage BigWig Files
+
+### Description
+Coverage depth bigWig files generated from strand-split BAMs for IGV visualization. Enabled by adding `^igv-bigwig` to CONFIG.
+
+### Format
+UCSC bigWig binary format (viewable in IGV, UCSC Genome Browser, etc.)
+
+### Location
+```
+results/igv/all_alignments/{genome}/{raw_sample}_{strand}.bw
+results/igv/filtered_alignments/{genome}/{raw_sample}_{strand}.bw
+```
+
+---
+
 ## Density BedGraph Files
 
 ### Description
@@ -319,6 +353,10 @@ Your CONFIG file should look something like this:
 ^t	data/windows
 ^t	data/annotations
 ^t	data/annotations_merged
+
+#Other settings
+^igv-bam
+^igv-bigwig
 ```
 The wildcard variables are assigned designated as:
 
@@ -328,6 +366,8 @@ The wildcard variables are assigned designated as:
 ^s The significance threshold for identifying reactive nucleotides
 ^r The relationship between sequencing reads
 ^t Directories containing temporary files (auto-deleted after use)
+^igv-bam Generate strand-split BAMs and indices for IGV visualization (flag, no value)
+^igv-bigwig Generate coverage bigWig files for each strand-split BAM (flag, no value)
 
 If you want to try out alternative variables, just add another row.
 
@@ -1341,6 +1381,63 @@ Output format (tab-delimited, gzipped):
 Example:
     average_feature_annotation.sh -i merged_annotations.txt.gz -o averaged_annotations.txt.gz
 ```
+
+---
+
+## 19. igv_split_bam
+
+**Description:** Split BAM into forward and reverse strand reads for IGV visualization.
+
+**Inputs:**
+- `data/aligned_reads/{genome}/{raw_sample}.bam` or `data/filtered_alignments/{genome}/{raw_sample}.bam`
+
+**Outputs:**
+- `results/igv/{all_alignments,filtered_alignments}/{genome}/{raw_sample}_{strand}.bam`
+
+**Dependencies:**
+- samtools
+
+**Usage:**
+Enabled by adding `^igv-bam` to CONFIG. Uses `samtools view -b -h -F 0x10` (forward) and `samtools view -b -h -f 0x10` (reverse) to split reads by mapping strand.
+
+---
+
+## 20. igv_index_bam
+
+**Description:** Create BAM index for IGV visualization.
+
+**Inputs:**
+- `results/igv/{all_alignments,filtered_alignments}/{genome}/{raw_sample}_{strand}.bam`
+
+**Outputs:**
+- `results/igv/{all_alignments,filtered_alignments}/{genome}/{raw_sample}_{strand}.bam.bai`
+
+**Dependencies:**
+- samtools
+
+**Usage:**
+Enabled by adding `^igv-bam` to CONFIG. Uses `samtools index`.
+
+---
+
+## 21. igv_coverage_bigwig
+
+**Description:** Generate coverage bigWig from strand-split BAM for IGV visualization.
+
+**Inputs:**
+- `results/igv/{all_alignments,filtered_alignments}/{genome}/{raw_sample}_{strand}.bam`
+- `results/igv/{all_alignments,filtered_alignments}/{genome}/{raw_sample}_{strand}.bam.bai`
+- `resources/genomes/{genome}.fa.fai`
+
+**Outputs:**
+- `results/igv/{all_alignments,filtered_alignments}/{genome}/{raw_sample}_{strand}.bw`
+
+**Dependencies:**
+- bedtools
+- bedGraphToBigWig (UCSC tools)
+
+**Usage:**
+Enabled by adding `^igv-bigwig` to CONFIG. Generates coverage bedGraph via `bedtools genomecov -ibam -bg`, then converts to bigWig with `bedGraphToBigWig`. Creates an empty file if the BAM has no reads.
 
 ---
 
