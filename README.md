@@ -223,6 +223,35 @@ results/igv/filtered_alignments/{genome}/{raw_sample}_{strand}.bw
 
 ---
 
+## Mean Reactivity BedGraph/BigWig Files
+
+### Description
+Mean reactivity values averaged within genomic windows. Useful for visualizing smoothed reactivity signal in genome browsers.
+
+### Format
+Tab-delimited bedGraph (4 columns, no header):
+| Column | Name | Description |
+|--------|------|-------------|
+| 1 | chrom | Chromosome name |
+| 2 | chromStart | Window start (0-based) |
+| 3 | chromEnd | Window end |
+| 4 | mean_reactivity | Mean reactivity in window (0 if no data) |
+
+### Example
+```
+chr19_MATERNAL	0	1000	0.001234
+chr19_MATERNAL	1000	2000	0.002345
+chr19_MATERNAL	2000	3000	-0.000123
+chr19_MATERNAL	3000	4000	0.001567
+chr19_MATERNAL	4000	5000	0.003456
+```
+
+### Location
+- BedGraph: `data/bg_mean_merged/{genome}/window_size_{mean_size}/{sample}_{strand}.bg`
+- BigWig: `data/bw_mean_merged/{genome}/window_size_{mean_size}/{sample}_{strand}.bw`
+
+---
+
 ## Density BedGraph Files
 
 ### Description
@@ -334,7 +363,10 @@ Your CONFIG file should look something like this:
 #^f	bed file	n_windows	window_size
 ^f	g4Discovery.bed	1000	10
 
-# Window size
+#Mean bedgraph window sizes
+^a	1000
+
+#Density bedgraph Window size
 ^w	1000000
 ^w	10000
 
@@ -362,6 +394,7 @@ The wildcard variables are assigned designated as:
 
 ^g The genome you want to map to
 ^f Features to annotate with optional parameters: bed_file, n_windows (default: 1000), window_size (default: 10)
+^a Window size for mean reactivity bedGraph/bigWig files
 ^w The window files you want in the windows bed files
 ^s The significance threshold for identifying reactive nucleotides
 ^r The relationship between sequencing reads
@@ -385,11 +418,48 @@ snakemake --dag | dot -Tpdf > dag.pdf
 
 ## 5. Run the pipeline
 
-Direct execution with Snakmake
+### Direct execution with Snakemake
 
 ```bash
 snakemake --cores 4
 ```
+
+### SLURM cluster execution (Penn State Roar)
+
+Generate a ready-to-submit SLURM batch script using `SLURM_CONFIG.sh`. This runs a
+`snakemake --dry-run` to count pending jobs, estimates wall time from benchmark data,
+and produces an sbatch script with the appropriate resource requests.
+
+```bash
+# Generate the batch script
+./workflow/scripts/SLURM_CONFIG.sh --env nanoprint
+
+# Or with custom settings
+./workflow/scripts/SLURM_CONFIG.sh \
+    --env nanoprint \
+    -i Snakefile \
+    --cores 16 \
+    --alloc open \
+    -o my_submit.sh \
+    --slog my_slurm_logs
+
+# Submit to the cluster
+sbatch 20260217_submit_nanoprint.sh
+```
+
+**Arguments:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--env` | (required) | Conda environment name or path |
+| `-i` | `./Snakefile` | Input Snakefile |
+| `-o` | `YYYYMMDD_submit_nanoprint.sh` | Output batch script |
+| `--alloc` | `open` | Allocation (`open` = free queue; any other value uses `sla-prio`) |
+| `--cores` | `8` | Number of cores (8 GB memory per core on standard partition) |
+| `--slog` | `YYYYMMDD_slurm_logs` | Directory for SLURM log files |
+
+The script automatically selects the SLURM partition based on `--alloc`: `open` uses the
+free `open` partition, while a paid allocation ID routes to `sla-prio` with `--account`.
 
 # Pipeline
 
@@ -402,33 +472,33 @@ snakemake --cores 4
               └─────────────────────────────────────────────┘
                                      │
                     ┌────────────────┼───────────────────┐
-                    │                                    │                                    
-                    ▼                                    ▼                                    
-        ┌───────────────────┐              ┌───────────────────┐                             
-        │  1. read_stats    │              │   2. map_reads    │                             
-        │  (Read_stats.sh)  │              │  (Map_reads.sh)   │                             
-        └───────────────────┘              └─────────┬─────────┘                             
-                                                     │                                       
-                                                     ▼                                       
-                                          ┌───────────────────────┐                          
-                                          │ 3. filter_alignments  │                          
-                                          │(Filter_alignments.sh) │                          
-                                          └─────────┬─────────────┘                          
-                                                    │                                        
-                       ┌────────────────────────────┼──────────────────────────┐                         
-                       │                            │                          │                         
-                       ▼                            │                          ▼                         
-        ┌───────────────────┐                       │              ┌───────────────────┐               
-        │ 4. alignment_stats│                       │              │   5. histograms   │               
-        │(Alignment_stats.sh│                       │              │(Make_histograms.sh│               
-        └───────────────────┘                       │              └───────────────────┘               
-                                                    │                                         
-┌─────────────────────────────────────────────┐     │   
-│      PHASE 2: PER-BASE ERROR                │     │     
-└─────────────────────────────────────────────┘     │     
-                                                    │                                        
-                                                    ▼                                   
-                                          ┌───────────────────────┐                          
+                    │                                    │
+                    ▼                                    ▼
+        ┌───────────────────┐              ┌───────────────────┐
+        │  1. read_stats    │              │   2. map_reads    │
+        │  (Read_stats.sh)  │              │  (Map_reads.sh)   │
+        └───────────────────┘              └─────────┬─────────┘
+                                                     │
+                                                     ▼
+                                          ┌───────────────────────┐
+                                          │ 3. filter_alignments  │
+                                          │(Filter_alignments.sh) │
+                                          └─────────┬─────────────┘
+                                                    │
+                       ┌────────────────────────────┼──────────────────────────┐
+                       │                            │                          │
+                       ▼                            │                          ▼
+        ┌───────────────────┐                       │              ┌───────────────────┐
+        │ 4. alignment_stats│                       │              │   5. histograms   │
+        │(Alignment_stats.sh│                       │              │(Make_histograms.sh│
+        └───────────────────┘                       │              └───────────────────┘
+                                                    │
+┌─────────────────────────────────────────────┐     │
+│      PHASE 2: PER-BASE ERROR                │     │
+└─────────────────────────────────────────────┘     │
+                                                    │
+                                                    ▼
+                                          ┌───────────────────────┐
                                           │   6. perbase_error    │
                                           │  (perbase_error.sh)   │
                                           └──────────┬────────────┘
@@ -440,10 +510,10 @@ snakemake --cores 4
                    │ 7. split_perbase_by_chr │                  │  8. correlation   │
                    │    (Split_by_chr.sh)    │                  │ (Correlation.sh)  │
                    │      [CHECKPOINT]       │                  └───────────────────┘
-                   └───────────┬─────────────┘       
-                               │                     
-                               │  (per chromosome)   
-                               │                     
+                   └───────────┬─────────────┘
+                               │
+                               │  (per chromosome)
+                               │
 ┌───────────────────────┐      ┼──────────────────────────────────┐
 │ PHASE 3: REACTIVITY   │      │                                  │
 └───────────────────────┘      │                                  │
@@ -454,32 +524,53 @@ snakemake --cores 4
                      │(Calculate_reactivity.sh)│                  │
                      └───────────┬─────────────┘                  │
                                  │                                │
-              ┌──────────────────┼───────────────────────────┐    │
-              │                  │                           │    │
-              │                  │                           │    │
-┌─────────┐   │                  │                           │    │
-│PHASE 4: │   │                  │                           │    │
-│OUTPUT   │   │                  │                           │    │
-│FORMATS  │   │                  │                           │    │
-└─────────┘   │                  │                           │    │
-              │                  │                           │    │
-              ▼                  ▼                           │    │
-┌─────────────────────────┐   ┌─────────────────────────┐    │    │
-│10. reactivity_to_bedgraph│  │  12. bedgraph_to_bigwig │    │    │
-│   (react_to_bg.sh)      │   │     (bg_to_bw.sh)       │    │    │
-└───────────┬─────────────┘   └───────────┬─────────────┘    │    │
-            │                             │ (merge           │    │
-            ▼                             ▼  chromosomes)    │    │
-┌─────────────────────────┐   ┌─────────────────────────┐    │    │
-│ 11. reactivity_density  │   │   13. merge_bigwig      │    │    │
-│   (react_dens.sh)       │   │   (Merge_bigwig.sh)     │    │    │
-└───────────┬─────────────┘   └─────────────────────────┘    │    │
-            │ (merge chromosomes)                            │    │
-            ▼                                                │    │
-┌─────────────────────────┐                                  │    │
-│   14. merge_density     │                                  │    │
-│   (Merge_density.sh)    │                                  │    │
-└─────────────────────────┘                                  │    │
+       ┌─────────────────────────┼───────────────────────────┐    │
+       │                         │                           │    │
+       │                         │                           │    │
+┌──────┴──┐                      │                           │    │
+│PHASE 4: │                      │                           │    │
+│OUTPUT   │                      │                           │    │
+│FORMATS  │                      │                           │    │
+└─────────┘                      │                           │    │
+       │                         │                           │    │
+       ├──────────┐              │                           │    │
+       │          │              │                           │    │
+       ▼          │              ▼                           │    │
+┌────────────────────────┐  │  ┌─────────────────────────┐   │    │
+│10. reactivity_to_      │  │  │  12. bedgraph_to_bigwig │   │    │
+│    bedgraph             │  │  │     (bg_to_bw.sh)       │   │    │
+│   (react_to_bg.sh)     │  │  └───────────┬─────────────┘   │    │
+└───────────┬────────────┘  │              │ (merge           │    │
+            │               │              ▼  chromosomes)    │    │
+            ▼               │  ┌─────────────────────────┐   │    │
+┌─────────────────────────┐ │  │   13. merge_bigwig      │   │    │
+│ 11. reactivity_density  │ │  │   (Merge_bigwig.sh)     │   │    │
+│   (react_dens.sh)       │ │  └─────────────────────────┘   │    │
+└───────────┬─────────────┘ │                                │    │
+            │ (merge chr)   │                                │    │
+            ▼               │                                │    │
+┌─────────────────────────┐ │                                │    │
+│   14. merge_density     │ │                                │    │
+│   (Merge_density.sh)    │ │                                │    │
+└─────────────────────────┘ │                                │    │
+                            │                                │    │
+                            ▼                                │    │
+               ┌──────────────────────────────┐              │    │
+               │ 15. mean_reactivity_bedgraph │              │    │
+               │    (react_mean_bg.sh)        │              │    │
+               └───────────┬──────────────────┘              │    │
+                           │ (merge chr)                     │    │
+                           ▼                                 │    │
+               ┌──────────────────────────────┐              │    │
+               │ 16. merge_mean_bedgraph      │              │    │
+               │    (Merge_density.sh)        │              │    │
+               └───────────┬──────────────────┘              │    │
+                           │                                 │    │
+                           ▼                                 │    │
+               ┌──────────────────────────────┐              │    │
+               │ 17. mean_bedgraph_to_bigwig  │              │    │
+               │    (mean_bg_to_bw.sh)        │              │    │
+               └──────────────────────────────┘              │    │
                                                              │    │
 ┌──────────────────────────────┐                             │    │
 │ PHASE 5: FEATURE ANNOTATION  │                             │    │
@@ -487,26 +578,26 @@ snakemake --cores 4
                                                              │    │
                                                              │    │
                               ┌─────────────────────────┐    │    │
-                              │15. split_features_by_chr│    │    │
+                              │18. split_features_by_chr│    │    │
                               │    (Split_by_chr.sh)    │    │    │
                               │      [CHECKPOINT]       │    │    │
                               └───────────┬─────────────┘    │    │
                                           │                  │    │
                                           ▼                  │    │
                               ┌─────────────────────────┐    │    │
-                              │  16. annotate_features  │◄───┘    │
+                              │  19. annotate_features  │◄───┘    │
                               │ (annotate_features.sh)  │◄────────┘
                               └───────────┬─────────────┘
                                           │ (merge chromosomes)
                                           ▼
                               ┌─────────────────────────┐
-                              │  17. merge_annotations  │
+                              │  20. merge_annotations  │
                               │ (Merge_annotations.sh)  │
                               └───────────┬─────────────┘
                                           │
                                           ▼
                               ┌───────────────────────────────┐
-                              │ 18. average_annotations       │
+                              │ 21. average_annotations       │
                               │(average_feature_annotation.sh)│
                               └───────────────────────────────┘
 ```
@@ -1203,7 +1294,122 @@ Example:
 
 ---
 
-## 15. split_features_by_chr
+## 15. mean_reactivity_bedgraph
+
+**Description:** Calculate mean reactivity in genomic windows (per chromosome).
+
+**Script:** `workflow/scripts/react_mean_bg.sh`
+
+**Inputs:**
+- `data/reactivity/{genome}/{sample}_{strand}_{chr}.txt.gz`
+- `resources/genomes/{genome}.fa.fai`
+
+**Outputs:**
+- `data/bg_mean/{genome}/window_size_{mean_size}/{sample}_{strand}_{chr}.bg`
+
+**Dependencies:**
+- bedtools
+- gawk
+
+**Documentation:**
+
+```
+Usage: react_mean_bg.sh -i <reactivity.txt.gz> -o <output.bg> -g <genome.fa.fai> [-w window] [-T tmpdir]
+
+Calculate mean reactivity in genomic windows.
+
+Required arguments:
+    -i    Input reactivity file (gzipped, from Calculate_reactivity.sh)
+    -o    Output bedGraph file (mean reactivity per window)
+    -g    Chromosome sizes file (FAI format from samtools faidx)
+
+Optional arguments:
+    -w    Window size in bp (default: 1000)
+    -T    Temporary directory (default: same directory as output)
+    -h    Show this help message
+
+Input format (4 columns, tab-separated):
+    1. Chromosome name
+    2. Position (1-based)
+    3. Nucleotide identity
+    4. Reactivity
+
+Output format: bedGraph (4 columns)
+    1. Chromosome name
+    2. Start (0-based)
+    3. End (1-based)
+    4. Mean reactivity in window
+
+Example:
+    react_mean_bg.sh -i reactivity_chr1.txt.gz -o mean_chr1.bg -g genome.fa.fai -w 1000
+```
+
+---
+
+## 16. merge_mean_bedgraph
+
+**Description:** Merge chromosome-split mean reactivity bedGraph files in genome order.
+
+**Script:** `workflow/scripts/Merge_density.sh` (reused)
+
+**Inputs:**
+- `data/bg_mean/{genome}/window_size_{mean_size}/{sample}_{strand}_{chr}.bg` (multiple)
+- `resources/genomes/{genome}.fa.fai`
+
+**Outputs:**
+- `data/bg_mean_merged/{genome}/window_size_{mean_size}/{sample}_{strand}.bg`
+
+**Dependencies:**
+- coreutils (cat)
+
+**Documentation:**
+
+See [14. merge_density](#14-merge_density) — same script is used for chromosome-order concatenation.
+
+---
+
+## 17. mean_bedgraph_to_bigwig
+
+**Description:** Convert merged mean reactivity bedGraph to bigWig format.
+
+**Script:** `workflow/scripts/mean_bg_to_bw.sh`
+
+**Inputs:**
+- `data/bg_mean_merged/{genome}/window_size_{mean_size}/{sample}_{strand}.bg`
+- `resources/genomes/{genome}.fa.fai`
+
+**Outputs:**
+- `data/bw_mean_merged/{genome}/window_size_{mean_size}/{sample}_{strand}.bw`
+
+**Dependencies:**
+- bedGraphToBigWig (UCSC tools)
+
+**Documentation:**
+
+```
+Usage: mean_bg_to_bw.sh -i <input.bg> -o <output.bw> -g <genome.fa.fai> [-T tmpdir]
+
+Convert a mean reactivity bedGraph file to bigWig format.
+
+Required arguments:
+    -i    Input bedGraph file (4-column: chr, start, end, mean_reactivity)
+    -o    Output bigWig file
+    -g    Chromosome sizes file (FAI format from samtools faidx)
+
+Optional arguments:
+    -T    Temporary directory (default: same directory as output)
+    -h    Show this help message
+
+Dependencies:
+    - bedGraphToBigWig (UCSC tools)
+
+Example:
+    mean_bg_to_bw.sh -i mean_merged.bg -o mean_merged.bw -g genome.fa.fai
+```
+
+---
+
+## 18. split_features_by_chr (Phase 5)
 
 **Description:** Split feature BED file by chromosome for parallelization. (CHECKPOINT)
 
@@ -1244,7 +1450,7 @@ Example:
 
 ---
 
-## 16. annotate_features
+## 19. annotate_features
 
 **Description:** Calculate signal around genomic features (per chromosome).
 
@@ -1302,7 +1508,7 @@ Example:
 
 ---
 
-## 17. merge_annotations
+## 20. merge_annotations
 
 **Description:** Merge chromosome-split annotation files.
 
@@ -1339,7 +1545,7 @@ Example:
 
 ---
 
-## 18. average_annotations
+## 21. average_annotations
 
 **Description:** Average annotations by distance, sample, and strand.
 
@@ -1384,7 +1590,7 @@ Example:
 
 ---
 
-## 19. igv_split_bam
+## 22. igv_split_bam
 
 **Description:** Split BAM into forward and reverse strand reads for IGV visualization.
 
@@ -1402,7 +1608,7 @@ Enabled by adding `^igv-bam` to CONFIG. Uses `samtools view -b -h -F 0x10` (forw
 
 ---
 
-## 20. igv_index_bam
+## 23. igv_index_bam
 
 **Description:** Create BAM index for IGV visualization.
 
@@ -1420,7 +1626,7 @@ Enabled by adding `^igv-bam` to CONFIG. Uses `samtools index`.
 
 ---
 
-## 21. igv_coverage_bigwig
+## 24. igv_coverage_bigwig
 
 **Description:** Generate coverage bigWig from strand-split BAM for IGV visualization.
 
@@ -1477,6 +1683,7 @@ Files in directories marked with `^t` are wrapped with Snakemake's `temp()` func
 | `data/bg/` | Per-chromosome bedGraph | `reactivity_density`, `bedgraph_to_bigwig` complete |
 | `data/bw/` | Per-chromosome bigWig | `merge_bigwig` complete |
 | `data/windows/` | Per-chromosome density | `merge_density` complete |
+| `data/bg_mean/` | Per-chromosome mean reactivity bedGraph | `merge_mean_bedgraph` complete |
 | `data/annotations/` | Per-chromosome annotations | `merge_annotations` complete |
 | `data/annotations_merged/` | Pre-averaged annotations | `average_annotations` complete |
 
@@ -1489,6 +1696,8 @@ Files in directories marked with `^t` are wrapped with Snakemake's `temp()` func
 | `data/perbase_error_by_chr/` | Per-base error (chromosome splits) |
 | `data/reactivity/` | Reactivity values (chromosome splits) |
 | `data/bw_merged/` | Final merged bigWig files |
+| `data/bg_mean_merged/` | Final merged mean reactivity bedGraph |
+| `data/bw_mean_merged/` | Final merged mean reactivity bigWig |
 | `data/windows_merged/` | Final merged density files |
 | `data/annotations_averaged/` | Final averaged annotations |
 | `tables/` | All QC statistics tables |

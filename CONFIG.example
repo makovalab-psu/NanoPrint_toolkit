@@ -5,7 +5,10 @@
 #^f	bed file	n_windows	window_size
 ^f	g4Discovery.bed	1000	10
 
-# Window size
+#Mean bedgraph window sizes
+^a	1000
+
+#Density bedgraph Window size
 ^w	1000000
 ^w	10000
 

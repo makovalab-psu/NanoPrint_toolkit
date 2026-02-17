@@ -139,3 +139,88 @@ rule merge_bigwig:
             {input.files} \
             2>&1 | tee {log}
         """
+
+
+# ============================================================================
+# Mean reactivity in genomic windows
+# ============================================================================
+
+def get_mean_bg_chr_files(wildcards):
+    """Get all chromosome mean bedGraph files for merging."""
+    chrs = CHROMOSOMES[wildcards.genome]
+    return expand(
+        "data/bg_mean/{genome}/window_size_{mean_size}/{sample}_{strand}_{chr}.bg",
+        genome=wildcards.genome,
+        mean_size=wildcards.mean_size,
+        sample=wildcards.sample,
+        strand=wildcards.strand,
+        chr=chrs
+    )
+
+
+rule mean_reactivity_bedgraph:
+    """Calculate mean reactivity in genomic windows (per chromosome)."""
+    input:
+        reactivity="data/reactivity/{genome}/{sample}_{strand}_{chr}.txt.gz",
+        fai="resources/genomes/{genome}.fa.fai"
+    output:
+        bedgraph=wrap_output("bg_mean", "data/bg_mean/{genome}/window_size_{mean_size}/{sample}_{strand}_{chr}.bg")
+    log:
+        "logs/mean_bedgraph/{genome}/{sample}_{strand}_{chr}_w{mean_size}.log"
+    benchmark:
+        "benchmarks/phase4/mean_reactivity_bedgraph/{genome}/{sample}_{strand}_{chr}_{mean_size}.tsv"
+    wildcard_constraints:
+        strand="for|rev"
+    shell:
+        """
+        workflow/scripts/react_mean_bg.sh \
+            -i {input.reactivity} \
+            -g {input.fai} \
+            -w {wildcards.mean_size} \
+            -o {output.bedgraph} \
+            2>&1 | tee {log}
+        """
+
+rule merge_mean_bedgraph:
+    """Merge chromosome-split mean reactivity bedGraph files in genome order."""
+    input:
+        files=get_mean_bg_chr_files,
+        fai="resources/genomes/{genome}.fa.fai"
+    output:
+        merged="data/bg_mean_merged/{genome}/window_size_{mean_size}/{sample}_{strand}.bg"
+    log:
+        "logs/merge_mean_bedgraph/{genome}/{sample}_{strand}_w{mean_size}.log"
+    benchmark:
+        "benchmarks/phase4/merge_mean_bedgraph/{genome}/{sample}_{strand}_{mean_size}.tsv"
+    wildcard_constraints:
+        strand="for|rev"
+    shell:
+        """
+        workflow/scripts/Merge_density.sh \
+            -g {input.fai} \
+            -o {output.merged} \
+            {input.files} \
+            2>&1 | tee {log}
+        """
+
+rule mean_bedgraph_to_bigwig:
+    """Convert merged mean reactivity bedGraph to bigWig format."""
+    input:
+        bedgraph="data/bg_mean_merged/{genome}/window_size_{mean_size}/{sample}_{strand}.bg",
+        fai="resources/genomes/{genome}.fa.fai"
+    output:
+        bigwig="data/bw_mean_merged/{genome}/window_size_{mean_size}/{sample}_{strand}.bw"
+    log:
+        "logs/mean_bigwig/{genome}/{sample}_{strand}_w{mean_size}.log"
+    benchmark:
+        "benchmarks/phase4/mean_bedgraph_to_bigwig/{genome}/{sample}_{strand}_{mean_size}.tsv"
+    wildcard_constraints:
+        strand="for|rev"
+    shell:
+        """
+        workflow/scripts/mean_bg_to_bw.sh \
+            -i {input.bedgraph} \
+            -g {input.fai} \
+            -o {output.bigwig} \
+            2>&1 | tee {log}
+        """

@@ -11,6 +11,7 @@ results/
 data/
 raw_data/
 resources/
+ROAR_pdfs/
 
 # Test files
 test/
@@ -34,3 +35,5 @@ tables/
 dag.pdf
 benchmarks/
 dag.png
+benchmarks01/
+benchmarks02/

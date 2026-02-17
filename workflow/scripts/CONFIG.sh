@@ -46,6 +46,7 @@ declare -a FEATURES=()
 declare -a FEATURE_N_WINDOWS=()
 declare -a FEATURE_WINDOW_SIZES=()
 declare -a WINDOW_SIZES=()
+declare -a MEAN_WINDOW_SIZES=()
 declare -a SIG_LEVELS=()
 declare -a SAMPLES=()
 declare -a TREATMENTS=()
@@ -106,9 +107,14 @@ while IFS= read -r line || [[ -n "$line" ]]; do
                 FEATURE_WINDOW_SIZES+=("$window_size")
                 ;;
             "^w")
-                # Window size
+                # Window size for density calculation
                 value=$(echo "$values" | cut -f1 | tr -d ' ')
                 WINDOW_SIZES+=("$value")
+                ;;
+            "^a")
+                # Window size for mean reactivity
+                value=$(echo "$values" | cut -f1 | tr -d ' ')
+                MEAN_WINDOW_SIZES+=("$value")
                 ;;
             "^s")
                 # Significance threshold
@@ -297,6 +303,13 @@ EOF
         echo "WINDOW_SIZES = []"
     fi
     echo ""
+    echo "# Window sizes for mean reactivity"
+    if [[ ${#MEAN_WINDOW_SIZES[@]} -gt 0 ]]; then
+        echo "MEAN_WINDOW_SIZES = $(python_list "${MEAN_WINDOW_SIZES[@]}")"
+    else
+        echo "MEAN_WINDOW_SIZES = []"
+    fi
+    echo ""
     echo "# Significance threshold levels"
     if [[ ${#SIG_LEVELS[@]} -gt 0 ]]; then
         echo "SIG_LEVELS = $(python_list "${SIG_LEVELS[@]}")"
@@ -357,6 +370,7 @@ EOF
     echo "    \"bw\": \"data/bw\" in TEMP_DIRS,"
     echo "    \"annotations\": \"data/annotations\" in TEMP_DIRS,"
     echo "    \"annotations_merged\": \"data/annotations_merged\" in TEMP_DIRS,"
+    echo "    \"bg_mean\": \"data/bg_mean\" in TEMP_DIRS,"
     echo "}"
     echo ""
     echo "# IGV export settings"
@@ -444,6 +458,11 @@ rule all:
         # Phase 4: Merged density files
         expand("data/windows_merged/{genome}/window_size_{size}/significance_threshold_{sig}/{sample}_{strand}.bg",
                genome=GENOMES, size=WINDOW_SIZES, sig=SIG_LEVELS, sample=SAMPLES, strand=STRANDS),
+
+        # Phase 4: Mean reactivity bigWig files
+        expand("data/bw_mean_merged/{genome}/window_size_{mean_size}/{sample}_{strand}.bw",
+               genome=GENOMES, mean_size=MEAN_WINDOW_SIZES, sample=SAMPLES, strand=STRANDS)
+        if MEAN_WINDOW_SIZES else [],
 
         # Phase 5: Averaged feature annotations
         expand("data/annotations_averaged/{genome}/{feature}/{sample}_{strand}.txt.gz",
