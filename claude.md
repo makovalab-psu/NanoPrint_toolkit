@@ -24,7 +24,7 @@ The pipeline is configured via a CONFIG file with prefix notation:
 | `^f` | Feature file (in resources/features/) | `^f g4Discovery.bed` |
 | `^a` | Window size for mean reactivity | `^a 1000` |
 | `^w` | Window size for density calculation | `^w 1000000` |
-| `^s` | Significance threshold (1-4) | `^s 2` |
+| `^s` | Significance threshold (0-4; multiple lines allowed) | `^s 2` |
 | `^r` | Relationship: Sample, Treatment, Control | `^r SampleName Treatment.bam Control.bam` |
 | `^t` | Temporary directory (auto-deleted) | `^t data/aligned_reads` |
 
@@ -353,6 +353,26 @@ Phase 3 (`Calculate_reactivity.sh`) outputs special marker values for positions 
 1. Two explicit filter points: `react_to_bg.sh` (line 97) and `annotate_features.sh` (embedded Python)
 2. All downstream scripts receive pre-filtered data
 3. Windows with no valid reactivity data output empty string for reactivity column
+
+### Significance Level 0 — All Data (Feb 2026)
+
+Adding `^s 0` to CONFIG produces unfiltered bigWig files containing all reactive positions (both positive and negative reactivity, excluding only the 999999/-999999 missing-data markers).
+
+**Behaviour by rule:**
+
+| Rule | Sig=0 behaviour |
+|------|----------------|
+| `reactivity_to_bedgraph` | Unchanged — always outputs all data; when null distribution is empty (no negative values), skips R threshold computation and writes a simplified header |
+| `bedgraph_to_bigwig` | Passes `-p 0` to `bg_to_bw.sh`, which strips the header and writes all positions verbatim |
+| `reactivity_density` | **Not run** — density counts significant positions by definition; `wildcard_constraints: sig="[1-4]"` prevents routing, and `DENSITY_SIG_LEVELS` in the Snakefile excludes "0" from density targets |
+
+**Generated variables in Snakefile:**
+- `SIG_LEVELS` — all levels from CONFIG including "0" (used for bigWig targets)
+- `DENSITY_SIG_LEVELS = [s for s in SIG_LEVELS if s != "0"]` — used for density targets
+
+**Output paths for sig=0:**
+- BigWig: `data/bw_merged/{genome}/significance_threshold_0/{sample}_{strand}.bw`
+- No `data/windows_merged/…/significance_threshold_0/…` files are created
 
 ### Snakemake Benchmarking (Feb 2026)
 

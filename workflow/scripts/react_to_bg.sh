@@ -104,6 +104,19 @@ awk -F'\t' '$4 < 0 { print -$4 }' "$FILTERED" > "$ABS_VALUES"
 NULL_COUNT=$(wc -l < "$ABS_VALUES" | tr -d ' ')
 echo "Null distribution size: $NULL_COUNT negative values"
 
+# If no negative values exist, skip threshold computation and write all data
+if [[ "$NULL_COUNT" -eq 0 ]]; then
+    echo "No negative reactivity values found - skipping significance threshold computation"
+    echo "Writing bedGraph output (all data, no significance thresholds)..."
+    {
+        echo "# Reactivity bedGraph - No significance thresholds (null distribution empty)"
+        echo ""
+        awk -F'\t' '{ print $1, $2-1, $2, $4 }' OFS='\t' "$FILTERED"
+    } > "$OUTPUT"
+    echo "Done: $OUTPUT"
+    exit 0
+fi
+
 echo "Downsampling for threshold calculation..."
 # Randomly downsample to 1,000,000 rows (or all if fewer)
 if [[ "$NULL_COUNT" -gt 1000000 ]]; then

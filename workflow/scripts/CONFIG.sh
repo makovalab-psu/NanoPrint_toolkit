@@ -317,6 +317,9 @@ EOF
         echo "SIG_LEVELS = []"
     fi
     echo ""
+    echo "# Significance levels for density/bigwig filtering (sig=0 excluded from density)"
+    echo "DENSITY_SIG_LEVELS = [s for s in SIG_LEVELS if s != \"0\"]"
+    echo ""
     echo "# Strand directions"
     echo "STRANDS = [\"for\", \"rev\"]"
     echo ""
@@ -455,9 +458,10 @@ rule all:
         expand("data/bw_merged/{genome}/significance_threshold_{sig}/{sample}_{strand}.bw",
                genome=GENOMES, sig=SIG_LEVELS, sample=SAMPLES, strand=STRANDS),
 
-        # Phase 4: Merged density files
+        # Phase 4: Merged density files (sig=0 excluded; density requires a significance threshold)
         expand("data/windows_merged/{genome}/window_size_{size}/significance_threshold_{sig}/{sample}_{strand}.bg",
-               genome=GENOMES, size=WINDOW_SIZES, sig=SIG_LEVELS, sample=SAMPLES, strand=STRANDS),
+               genome=GENOMES, size=WINDOW_SIZES, sig=DENSITY_SIG_LEVELS, sample=SAMPLES, strand=STRANDS)
+        if WINDOW_SIZES and DENSITY_SIG_LEVELS else [],
 
         # Phase 4: Mean reactivity bigWig files
         expand("data/bw_mean_merged/{genome}/window_size_{mean_size}/{sample}_{strand}.bw",

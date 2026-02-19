@@ -61,7 +61,8 @@ rule reactivity_density:
     benchmark:
         "benchmarks/phase4/reactivity_density/{genome}/{sample}_{strand}_{chr}_{size}_{sig}.tsv"
     wildcard_constraints:
-        strand="for|rev"
+        strand="for|rev",
+        sig="[1-4]"
     shell:
         """
         workflow/scripts/react_dens.sh \

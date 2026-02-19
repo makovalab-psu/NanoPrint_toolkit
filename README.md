@@ -370,7 +370,8 @@ Your CONFIG file should look something like this:
 ^w	1000000
 ^w	10000
 
-#Significance threshold level, 1 is p <= 0.05,  2 is p <= 0.01,  3 is p <= 0.001,  4 is p <= 0.0001.
+#Significance threshold level, 0 is all data (no threshold),  1 is p <= 0.05,  2 is p <= 0.01,  3 is p <= 0.001,  4 is p <= 0.0001.
+#Multiple levels can be specified (one per line). Density files are not produced for level 0.
 ^s	2
 
 #Relationships between files
@@ -396,7 +397,7 @@ The wildcard variables are assigned designated as:
 ^f Features to annotate with optional parameters: bed_file, n_windows (default: 1000), window_size (default: 10)
 ^a Window size for mean reactivity bedGraph/bigWig files
 ^w The window files you want in the windows bed files
-^s The significance threshold for identifying reactive nucleotides
+^s The significance threshold for identifying reactive nucleotides (0 = all data, no threshold; 1–4 = p-value cutoffs; multiple lines allowed; level 0 does not produce density files)
 ^r The relationship between sequencing reads
 ^t Directories containing temporary files (auto-deleted after use)
 ^igv-bam Generate strand-split BAMs and indices for IGV visualization (flag, no value)
@@ -1122,7 +1123,7 @@ Required arguments:
 
 Optional arguments:
     -w    Window size in bp (default: 1000)
-    -p    Significance level filter (default: 4)
+    -p    Significance level filter (default: 4); must be 1–4 (level 0 not supported)
               1 = p <= 0.05
               2 = p <= 0.01
               3 = p <= 0.001
@@ -1142,6 +1143,9 @@ Output format: bedGraph (5 columns)
     3. End (1-based)
     4. Count of reactive nucleotides in window
     5. Sum of significant reactivity signal in window (after filtering)
+
+Note: Significance level 0 (all data) is not supported for density calculation.
+When ^s 0 is set in CONFIG, density files are not produced for that level.
 
 Example:
     react_dens.sh -i react_chr1.bg -o density_chr1.bg -g genome.fa.fai -w 1000 -p 4
