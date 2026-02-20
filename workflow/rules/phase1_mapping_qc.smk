@@ -68,12 +68,14 @@ rule map_reads:
         "logs/map_reads/{genome}/{raw_sample}.log"
     benchmark:
         "benchmarks/phase1/map_reads/{genome}/{raw_sample}.tsv"
+    threads: 8
     shell:
         """
         workflow/scripts/Map_reads.sh \
             -i {input.reads} \
             -g {input.genome} \
             -o {output.bam} \
+            -t {threads} \
             2>&1 | tee {log}
         """
 

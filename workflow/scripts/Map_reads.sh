@@ -1,16 +1,16 @@
 #!/bin/bash
 
 # Description: Map raw reads to reference genome using minimap2 and sort with samtools
-# Usage: ./Map_reads.sh -i <input_file> -o <output_file> -g <genome.fasta> -T <temp_dir>
+# Usage: ./Map_reads.sh -i <input_file> -o <output_file> -g <genome.fasta> -T <temp_dir> -t <threads>
 
 # Function to display usage
 usage() {
-    echo "Usage: $0 -i <input_file> -o <output_file> -g <genome.fasta> -T <temp_dir>"
+    echo "Usage: $0 -i <input_file> -o <output_file> -g <genome.fasta> -T <temp_dir> -t <threads>"
     exit 1
 }
 
 # Parse command line arguments
-while getopts ":i:o:g:T:" opt; do
+while getopts ":i:o:g:T:t:" opt; do
     case ${opt} in
         i )
             INPUT_FILE=$OPTARG
@@ -24,11 +24,17 @@ while getopts ":i:o:g:T:" opt; do
         T )
             TMP_DIR=$OPTARG
             ;;
+        t )
+            THREADS=$OPTARG
+            ;;
         \? )
             usage
             ;;
     esac
 done
+
+# Default to 1 thread if not specified
+THREADS="${THREADS:-1}"
 
 # Check if all mandatory arguments are provided
 if [ -z "${INPUT_FILE}" ] || [ -z "${OUTPUT_FILE}" ] || [ -z "${GENOME_FILE}" ]; then
@@ -69,11 +75,9 @@ else
     FASTQ_FILE="${INPUT_FILE}"
 fi
 
-minimap2 -a -x lr:hq "${GENOME_FILE}" "${FASTQ_FILE}" > "${TMP_DIR}/output.sam" 
-
-# Sort the SAM file and convert to BAM
 echo "Sorting the output..."
-samtools sort -o "${OUTPUT_FILE}" "${TMP_DIR}/output.sam"
+minimap2 -a -x lr:hq -t "${THREADS}" "${GENOME_FILE}" "${FASTQ_FILE}" \
+    | samtools sort -@ "${THREADS}" -T "${TMP_DIR}/sort_tmp" -o "${OUTPUT_FILE}"
 
 echo "Mapping completed. Sorted BAM file available at ${OUTPUT_FILE}."
 

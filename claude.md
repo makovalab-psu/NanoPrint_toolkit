@@ -665,6 +665,27 @@ The benchmark file uses a pipe-delimited markdown table with human-readable time
 - SBATCH header built as a variable to avoid blank lines when `--account` is omitted
 - Falls back to 48-hour default if benchmark file is missing
 
+### map_reads: Threading and Memory (Feb 2026)
+
+minimap2 requires ~12–16 GB RAM to index and map against a human-sized genome (~3.1 GB). On the Penn State Roar `standard` partition (8 GB/core), a single-core job is insufficient and will be killed by the Linux OOM killer mid-run, producing a truncated SAM that causes `samtools sort` to fail with `[E::sam_parse1] SEQ and QUAL are of different length`.
+
+**Fixes applied:**
+
+1. **`Map_reads.sh`**: minimap2 now pipes directly to `samtools sort` instead of writing an intermediate SAM file. This eliminates a ~100 GB temp file and the associated I/O buffer memory pressure. A `-t <threads>` flag was added (defaults to `1`); `samtools sort` receives the same value via `-@`.
+
+2. **`phase1_mapping_qc.smk`**: `map_reads` rule declares `threads: 8`. This tells Snakemake to reserve 8 cores per job, giving 64 GB on Roar's standard partition — well above the minimap2 peak.
+
+**OOM kill symptoms to recognise:**
+```
+line 72: 539084 Killed    minimap2 ...
+[E::sam_parse1] SEQ and QUAL are of different length
+samtools sort: truncated file. Aborting
+```
+
+**SLURM memory guidance for map_reads:**
+- `standard` partition: request ≥ 2 cores (16 GB) for small genomes, ≥ 8 cores (64 GB) for human
+- `himem` partition (20 GB/core): 1–2 cores sufficient for human genome
+
 ### Mean Reactivity in Genomic Windows (Feb 2026)
 
 Three new phase 4 rules compute mean reactivity in genomic windows, controlled by the `^a` CONFIG prefix (e.g., `^a 1000` for 1000bp windows). This is distinct from the density rules (`^w`/`^s`) which count significant positions.
