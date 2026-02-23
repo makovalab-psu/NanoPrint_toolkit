@@ -137,9 +137,9 @@ echo "Calculating significance thresholds from null distribution..."
 
 # Use R's quantile function for accurate percentile calculation
 # Using system R (/usr/local/bin/Rscript) to avoid conda library conflicts
-read THRESH_05 THRESH_01 THRESH_001 THRESH_0001 <<< $(/usr/local/bin/Rscript --vanilla -e "
+read THRESH_05 THRESH_01 THRESH_001 THRESH_0001 <<< $(Rscript --vanilla -e "
 x <- scan('$SAMPLED', quiet=TRUE)
-q <- quantile(x, probs=c(0.95, 0.99, 0.999, 0.9999))
+q <- quantile(x, probs=c(0.95, 0.99, 0.999, 0.9999), na.rm = TRUE)
 cat(q, sep=' ')
 ")
 
