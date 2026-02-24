@@ -708,3 +708,29 @@ Three new phase 4 rules compute mean reactivity in genomic windows, controlled b
 - `^a` prefix parsed into `MEAN_WINDOW_SIZES` array
 - `TEMP_OUTPUTS["bg_mean"]` added for `data/bg_mean` temp support
 - `rule all` targets conditional on `MEAN_WINDOW_SIZES` being non-empty
+
+### Bash Arithmetic Post-Increment with set -e (Feb 2026)
+
+`((var++))` is a silent killer under `set -euo pipefail`. The post-increment operator returns the **old** value as the expression result. When `var` starts at 0:
+
+```bash
+set -euo pipefail
+merged_count=0
+((merged_count++))   # evaluates to ((0)) → exit code 1 → script dies
+```
+
+**Symptom:** A merge script (`Merge_density.sh`, `Merge_bigwig.sh`) processes exactly the first chromosome and then exits with non-zero status. The log shows one successful `+` line followed by no further output.
+
+**Affected scripts:** `Merge_density.sh` (line 131) and `Merge_bigwig.sh` (line 176) both had this bug. Fixed Feb 2026.
+
+**Fix:** Use plain arithmetic assignment, which always exits 0:
+```bash
+merged_count=$((merged_count + 1))   # correct — assignment always succeeds
+```
+
+**Alternatives that also work:**
+- `((++merged_count))` — pre-increment, evaluates to new value (≥1 when starting from 0)
+- `((merged_count += 1))` — evaluates to new value
+- `((merged_count++)) || true` — suppress exit code (less readable)
+
+**Rule of thumb:** Avoid bare `(( ))` expressions as statements under `set -e` unless you are certain the expression value will always be non-zero. Prefer `var=$((expr))` for counters.

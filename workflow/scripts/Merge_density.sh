@@ -128,7 +128,7 @@ while read -r chr size rest; do
     file=$(get_file_for_chr "$chr") && {
         cat "$file" >> "$OUTPUT"
         echo "  + $chr ($file)"
-        ((merged_count++))
+        merged_count=$((merged_count + 1))
     }
 done < "$GENOME_FAI"
 

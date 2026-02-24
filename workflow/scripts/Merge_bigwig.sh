@@ -173,7 +173,7 @@ while read -r chr size rest; do
         cat "$tmp_bg" >> "$MERGED_BG"
         rm "$tmp_bg"
 
-        ((merged_count++))
+        merged_count=$((merged_count + 1))
     fi
 done < "$GENOME_FAI"
 
