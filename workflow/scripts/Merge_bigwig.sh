@@ -180,14 +180,14 @@ done < "$GENOME_FAI"
 echo ""
 echo "Merged $merged_count chromosomes"
 
-# Sort bedGraph (required by bedGraphToBigWig)
-echo "Sorting merged bedGraph..."
-SORTED_BG="${TMP_DIR}/merged_sorted.bg"
-sort -k1,1 -k2,2n "$MERGED_BG" > "$SORTED_BG"
+# No sort needed: chromosomes are already concatenated in FAI order and each
+# per-chromosome bigWig is internally position-sorted (bedGraphToBigWig requires
+# sorted input to create them). Sorting the full merged file is redundant and
+# can OOM-kill on large genomes.
 
 # Convert to bigWig
 echo "Converting to bigWig..."
-bedGraphToBigWig "$SORTED_BG" "$CHROM_SIZES" "$OUTPUT"
+bedGraphToBigWig "$MERGED_BG" "$CHROM_SIZES" "$OUTPUT"
 
 echo ""
 echo "Done. Output: $OUTPUT"

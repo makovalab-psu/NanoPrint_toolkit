@@ -734,3 +734,21 @@ merged_count=$((merged_count + 1))   # correct — assignment always succeeds
 - `((merged_count++)) || true` — suppress exit code (less readable)
 
 **Rule of thumb:** Avoid bare `(( ))` expressions as statements under `set -e` unless you are certain the expression value will always be non-zero. Prefer `var=$((expr))` for counters.
+
+### merge_bigwig OOM Kill — Sort Eliminated (Feb 2026)
+
+`Merge_bigwig.sh` was OOM-killed on large genomes at the `sort` step (previously line 186):
+
+```
+workflow/scripts/Merge_bigwig.sh: line 186: 233999 Killed    sort -k1,1 -k2,2n "$MERGED_BG" > "$SORTED_BG"
+```
+
+**Root cause:** The script converted per-chromosome bigWigs to bedGraph, concatenated them into one large file, then sorted the entire merged bedGraph before passing it to `bedGraphToBigWig`. For a human genome this means sorting hundreds of millions of lines in memory.
+
+**Why the sort is unnecessary:**
+
+1. The merge loop (`while read ... done < "$GENOME_FAI"`) already concatenates chromosomes in FAI order.
+2. Each per-chromosome `.bw` was itself created by `bedGraphToBigWig`, which requires sorted input — so `bigWigToBedGraph` on those files yields position-sorted output per chromosome.
+3. `bedGraphToBigWig` only requires that records within each chromosome are position-sorted and that all records for a chromosome are contiguous — both conditions are already met.
+
+**Fix:** Removed the `sort` step entirely. `MERGED_BG` is passed directly to `bedGraphToBigWig`. The `SORTED_BG` temp file is no longer created.
