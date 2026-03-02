@@ -5,13 +5,10 @@
 
 set -euo pipefail
 
-# Get the directory where this script is located
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 # Usage function
 usage() {
     cat << EOF
-Usage: $(basename "$0") -i <input_stats.txt> -o <output_histograms.txt> [-p <output_histograms.pdf>]
+Usage: $(basename "$0") -i <input_stats.txt> -o <output_histograms.txt>
 
 Extract histogram data from samtools stats output files.
 
@@ -20,7 +17,6 @@ Required arguments:
     -o    Output histogram file (tab-delimited)
 
 Optional arguments:
-    -p    Output PDF file with histogram plots
     -h    Show this help message
 
 Output format (tab-delimited with header):
@@ -37,7 +33,6 @@ Histogram types extracted:
 
 Example:
     $(basename "$0") -i sample_stats.txt -o sample_histograms.txt
-    $(basename "$0") -i sample_stats.txt -o sample_histograms.txt -p sample_histograms.pdf
 EOF
     exit 1
 }
@@ -45,13 +40,11 @@ EOF
 # Parse arguments
 INPUT=""
 OUTPUT=""
-PDF_OUTPUT=""
 
-while getopts "i:o:p:h" opt; do
+while getopts "i:o:h" opt; do
     case $opt in
         i) INPUT="$OPTARG" ;;
         o) OUTPUT="$OPTARG" ;;
-        p) PDF_OUTPUT="$OPTARG" ;;
         h) usage ;;
         *) usage ;;
     esac
@@ -69,39 +62,15 @@ if [[ ! -f "$INPUT" ]]; then
     exit 1
 fi
 
-# Check R script exists if PDF output requested
-R_SCRIPT="${SCRIPT_DIR}/Plot_histograms.R"
-if [[ -n "$PDF_OUTPUT" ]]; then
-    if [[ ! -f "$R_SCRIPT" ]]; then
-        echo "Error: R plotting script not found: $R_SCRIPT" >&2
-        exit 1
-    fi
-    if ! command -v Rscript &> /dev/null; then
-        echo "Error: Rscript not found. Please install R." >&2
-        exit 1
-    fi
-fi
-
 # Create output directory if needed
 OUT_DIR=$(dirname "$OUTPUT")
 if [[ -n "$OUT_DIR" && "$OUT_DIR" != "." ]]; then
     mkdir -p "$OUT_DIR"
 fi
 
-# Create PDF output directory if needed
-if [[ -n "$PDF_OUTPUT" ]]; then
-    PDF_DIR=$(dirname "$PDF_OUTPUT")
-    if [[ -n "$PDF_DIR" && "$PDF_DIR" != "." ]]; then
-        mkdir -p "$PDF_DIR"
-    fi
-fi
-
 echo "=== Histogram Extraction ==="
 echo "Input: $INPUT"
 echo "Output: $OUTPUT"
-if [[ -n "$PDF_OUTPUT" ]]; then
-    echo "PDF Output: $PDF_OUTPUT"
-fi
 echo ""
 
 # Write header
@@ -134,14 +103,5 @@ grep "^COV" "$INPUT" | awk -F'\t' '{print "COV\t" $2 "\t" $3}' >> "$OUTPUT"
 
 echo ""
 echo "Histogram data: $OUTPUT"
-
-# Generate PDF if requested
-if [[ -n "$PDF_OUTPUT" ]]; then
-    echo ""
-    echo "Generating PDF plots..."
-    Rscript "$R_SCRIPT" "$OUTPUT" "$PDF_OUTPUT"
-    echo "PDF output: $PDF_OUTPUT"
-fi
-
 echo ""
 echo "Done."

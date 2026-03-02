@@ -154,7 +154,7 @@ if [[ "$FILE_TYPE" == "fastq" ]]; then
         # Find max length for iteration
         max_len = 0
         for (l in len_hist) {
-            if (l > max_len) max_len = l
+            if (l + 0 > max_len) max_len = l + 0
         }
         for (l = max_len; l >= 1; l--) {
             if (l in len_hist) {
@@ -171,7 +171,7 @@ if [[ "$FILE_TYPE" == "fastq" ]]; then
         q50 = 0
         max_qual = 0
         for (q in qual_hist) {
-            if (q > max_qual) max_qual = q
+            if (q + 0 > max_qual) max_qual = q + 0
         }
         for (q = max_qual; q >= 0; q--) {
             if (q in qual_hist) {
@@ -230,7 +230,7 @@ elif [[ "$FILE_TYPE" == "bam" ]]; then
         n50 = 0
         max_len = 0
         for (l in len_hist) {
-            if (l > max_len) max_len = l
+            if (l + 0 > max_len) max_len = l + 0
         }
         for (l = max_len; l >= 1; l--) {
             if (l in len_hist) {
@@ -246,7 +246,7 @@ elif [[ "$FILE_TYPE" == "bam" ]]; then
         q50 = 0
         max_qual = 0
         for (q in qual_hist) {
-            if (q > max_qual) max_qual = q
+            if (q + 0 > max_qual) max_qual = q + 0
         }
         for (q = max_qual; q >= 0; q--) {
             if (q in qual_hist) {

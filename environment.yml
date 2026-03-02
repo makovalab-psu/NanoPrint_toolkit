@@ -28,3 +28,4 @@ dependencies:
   - r-base
   - r-ggplot2
   - r-dplyr
+  - r-gridextra

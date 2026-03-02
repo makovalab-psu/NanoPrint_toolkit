@@ -115,6 +115,17 @@ Phase 1 rules use `find_raw_reads()` helper function that automatically detects 
 - Calculate signal around genomic features (TSS, etc.)
 - Merge and average annotations
 
+### Phase 6: IGV Export (Optional)
+- Generate strand-split BAMs for IGV visualization (enabled by `^igv-bam`)
+- Create BAM indices and coverage bigWig files (enabled by `^igv-bigwig`)
+
+### Phase 7: Summary Tables & Plots
+- Compile per-sample read statistics into a single CSV table
+- Compile per-sample alignment statistics into a single CSV table
+- Generate 5-panel histogram PDFs (Read Length, MAPQ, Insertion, Deletion, Coverage)
+- Compute pairwise Spearman/Pearson correlations and heatmap PDF
+- Plot mean coverage, per-base error, and reactivity around genomic features
+
 ## Dependencies
 
 Install via conda:
@@ -148,10 +159,20 @@ raw_data/                # Input FASTQ/BAM files
 resources/
   genomes/               # Reference genomes (.fa)
   features/              # Feature BED files
-tables/                  # Summary statistics
+tables/                  # Summary statistics and QC tables
+  read_stats/            # Per-sample read statistics (input for Phase 7)
+  alignment_stats/       # Per-sample alignment statistics (input for Phase 7)
+  correlation/           # Per-sample-pair raw correlation data
+  perbase_error_correlation/  # Summarized pairwise correlation tables
+  read_stats_table.csv   # Aggregated read stats (Phase 7 output)
+  alignment_stats_table.csv  # Aggregated alignment stats (Phase 7 output)
+plots/                   # Publication-quality PDF figures (Phase 7)
+  histograms/            # 5-panel histogram PDFs by alignment type
+  perbase_error_correlation/  # Pairwise correlation heatmaps
+  annotations_averaged/  # Feature annotation line plots
 workflow/
   scripts/               # Shell scripts including CONFIG.sh
-  rules/                 # Snakemake rule files (phases 1-5)
+  rules/                 # Snakemake rule files (phases 1-7)
 ```
 
 ## Usage
@@ -399,8 +420,7 @@ benchmarks/
 │   └── histograms/{alignment}/{genome}/{raw_sample}.tsv
 ├── phase2/
 │   ├── perbase_error/{genome}/{raw_sample}_{strand}.tsv
-│   ├── split_perbase_by_chr/{genome}/{raw_sample}_{strand}.tsv
-│   └── correlation/{genome}/{raw_sample_a}_vs_{raw_sample_b}_{strand}.tsv
+│   └── split_perbase_by_chr/{genome}/{raw_sample}_{strand}.tsv
 ├── phase3/
 │   └── calculate_reactivity/{genome}/{sample}_{strand}_{chr}.tsv
 ├── phase4/
@@ -409,11 +429,18 @@ benchmarks/
 │   ├── merge_density/{genome}/{sample}_{strand}_{size}_{sig}.tsv
 │   ├── bedgraph_to_bigwig/{genome}/{sample}_{strand}_{chr}_{sig}.tsv
 │   └── merge_bigwig/{genome}/{sample}_{strand}_{sig}.tsv
-└── phase5/
-    ├── split_features_by_chr/{feature}.tsv
-    ├── annotate_features/{genome}/{feature}/{sample}_{strand}_{chr}.tsv
-    ├── merge_annotations/{genome}/{feature}/{sample}_{strand}.tsv
-    └── average_annotations/{genome}/{feature}/{sample}_{strand}.tsv
+├── phase5/
+│   ├── split_features_by_chr/{feature}.tsv
+│   ├── annotate_features/{genome}/{feature}/{sample}_{strand}_{chr}.tsv
+│   ├── merge_annotations/{genome}/{feature}/{sample}_{strand}.tsv
+│   └── average_annotations/{genome}/{feature}/{sample}_{strand}.tsv
+└── phase7/
+    ├── correlation/{genome}/{raw_sample_a}_vs_{raw_sample_b}_{strand}.tsv
+    ├── summarize_correlation/{genome}.tsv
+    ├── summary_histogram_plot/{alignment}/{genome}/{raw_sample}.tsv
+    ├── plot_annotation/{genome}/{feature}/{sample}.tsv
+    ├── alignment_stats_table.tsv
+    └── read_stats_table.tsv
 ```
 
 **Resource-intensive rules to monitor:**
@@ -637,9 +664,10 @@ sbatch 20260217_submit_nanoprint.sh
 
 1. Runs `snakemake --dry-run --quiet` and parses the job count summary table
 2. Reads benchmark averages from `workflow/run_data/benchmark_summary.txt`
-3. For each rule, takes the **max** of bench01 (chicken.v23) and bench02 (test_genome) averages as a conservative estimate
+3. For each rule, takes the **max** of bench03 (human HG002) and bench04 (chicken.v23) averages as a conservative estimate; also tracks peak RSS per rule
 4. Computes: `(total_serial_time / cores) * 1.2` safety margin, rounded up to next hour, capped at 14 days
-5. Generates sbatch script with `module load anaconda`, `conda activate`, and `snakemake --cores $SLURM_NTASKS`
+5. Prints a **memory summary**: rule with peak RSS, minimum cores needed at 8 GB/core, and a WARNING if `--cores` is insufficient
+6. Generates sbatch script with `module load anaconda`, `conda activate`, and `snakemake --cores $SLURM_NTASKS`
 
 **Partition auto-selection:**
 - `--alloc open` → `#SBATCH --partition=open` (free queue, no `--account`)
@@ -653,11 +681,25 @@ sbatch 20260217_submit_nanoprint.sh
 
 **Benchmark data:**
 
-`workflow/run_data/benchmark_summary.txt` contains per-rule timing from two runs:
-- `benchmarks01/` = chicken.v23 genome (large, 38+ chromosomes, 670 benchmark files)
-- `benchmarks02/` = test_genome (small dataset, 135 benchmark files)
+`workflow/run_data/benchmark_summary.txt` contains per-rule timing, peak memory, and CPU load from two runs:
+- `benchmarks03/` = hg002v1.1_MATERNAL_chrY_chrM genome (human HG002, large dataset, 1663 benchmark files)
+- `benchmarks04/` = chicken.v23 genome (Chicken Fibroblast, medium dataset, 1077 benchmark files)
 
-The benchmark file uses a pipe-delimited markdown table with human-readable time units (`39.1m`, `3.0h`, `15.3s`). The SLURM_CONFIG.sh script parses these with a `time_to_seconds()` function using `bc`.
+Table columns (pipe-delimited markdown, 11 data columns per benchmark run):
+```
+| Rule | bench03 Total | n | bench03 Avg | bench03 PeakRSS | bench03 AvgLoad |
+        bench04 Total | n | bench04 Avg | bench04 PeakRSS | bench04 AvgLoad |
+```
+
+awk column positions (1-indexed, leading empty field from first `|`):
+- `$5` = bench03 Avg, `$6` = bench03 PeakRSS, `$7` = bench03 AvgLoad
+- `$10` = bench04 Avg, `$11` = bench04 PeakRSS, `$12` = bench04 AvgLoad
+
+- **PeakRSS**: max `max_rss` across all jobs for that rule, in MB (e.g. `"32189MB"`). Parsed by `rss_to_mb()` which strips the `MB` suffix. May be `"-"` for very fast rules where the OS sampling interval missed the process.
+- **AvgLoad**: mean CPU load across all jobs (>100% = multithreaded). Informational only; not used for estimation.
+- Notable memory peaks: `merge_bigwig` ~32 GB, `bedgraph_to_bigwig` ~18 GB, `map_reads` ~24 GB
+
+The script parses times with `time_to_seconds()` and RSS with `rss_to_mb()`, both using `bc`.
 
 **Key design decisions:**
 - Uses manual argument parsing (not `getopts`) for long option support (`--env`, `--alloc`, `--cores`, `--slog`)
@@ -735,6 +777,37 @@ merged_count=$((merged_count + 1))   # correct — assignment always succeeds
 
 **Rule of thumb:** Avoid bare `(( ))` expressions as statements under `set -e` unless you are certain the expression value will always be non-zero. Prefer `var=$((expr))` for counters.
 
+### Read_stats.sh: N50/Q50 Always Zero — awk String Comparison Bug (Feb 2026)
+
+`workflow/scripts/Read_stats.sh` consistently returned `0` for both N50 and Q50 for all input files (FASTQ and BAM paths).
+
+**Root cause: awk array key comparison is lexicographic, not numeric**
+
+The max-finding loops iterate over associative array keys with `for (l in len_hist)`. In BSD awk (macOS default), array keys are strings, and comparing a string to a number uses **lexicographic ordering** under POSIX rules. This causes `max_len` to be set to the lexicographically largest key, not the numerically largest.
+
+Example with read lengths `{5000, 12000, 9500}`:
+- `"9500" > "5000"` → true (lexicographic: `"9" > "5"`)
+- `"12000" > "9500"` → **false** (lexicographic: `"1" < "9"`)
+- Result: `max_len = 9500`, skipping all reads ≥ 10,000 bp
+
+The downward traversal loop then starts at the wrong point. For typical ONT data where N50 > 10,000 bp, the cumulative sum from 9,500 down to 1 never reaches `half_bp`, so `n50` stays `0`.
+
+The identical bug affected `max_qual` for Q50. For modern ONT data (Q15–Q25), any bin starting with digit `"9"` (e.g., bin 90 = Phred 9.0) beats bin `"200"` (Phred 20.0) lexicographically. The loop starts at the wrong bin, accumulates only bases from Q0–Q9 (a tiny fraction), and `q50` stays `0`.
+
+**Note:** This bug may not appear on Linux (where gawk is the default `awk`), since gawk treats numeric array keys as numeric strings for comparison.
+
+**Fix:** Force numeric coercion with `+ 0` in all four max-finding comparisons (FASTQ N50, FASTQ Q50, BAM N50, BAM Q50):
+
+```awk
+# Before (string comparison — wrong)
+if (l > max_len) max_len = l
+
+# After (numeric comparison — correct)
+if (l + 0 > max_len) max_len = l + 0
+```
+
+**Rule of thumb:** Never rely on `>` / `<` comparisons when iterating awk array keys with `for (k in arr)` — always use `k + 0` to force numeric comparison.
+
 ### merge_bigwig OOM Kill — Sort Eliminated (Feb 2026)
 
 `Merge_bigwig.sh` was OOM-killed on large genomes at the `sort` step (previously line 186):
@@ -752,3 +825,40 @@ workflow/scripts/Merge_bigwig.sh: line 186: 233999 Killed    sort -k1,1 -k2,2n "
 3. `bedGraphToBigWig` only requires that records within each chromosome are position-sorted and that all records for a chromosome are contiguous — both conditions are already met.
 
 **Fix:** Removed the `sort` step entirely. `MERGED_BG` is passed directly to `bedGraphToBigWig`. The `SORTED_BG` temp file is no longer created.
+
+### Phase 7: Summary Tables & Plots (Mar 2026)
+
+Phase 7 aggregates pipeline outputs into human-readable CSV tables and publication-quality PDFs. All 6 rules live in `workflow/rules/phase7_summary_tables_plots.smk`.
+
+**Rules and scripts:**
+
+| Rule | Script | Output |
+|------|--------|--------|
+| `read_stats_table` | `read_stats_table.sh` | `tables/read_stats_table.csv` |
+| `alignment_stats_table` | `alignment_stats_table.sh` | `tables/alignment_stats_table.csv` |
+| `summary_histogram_plot` | `Plot_summary_histograms.R` | `plots/histograms/{alignment}/{genome}/{raw_sample}_histograms.pdf` |
+| `correlation` | `Correlation.sh` | `tables/correlation/{genome}/{raw_sample_a}_vs_{raw_sample_b}_{strand}.txt` |
+| `summarize_correlation` | `Summarize_correlation.R` | `tables/perbase_error_correlation/{genome}/Pairwise_correlation_table.csv` + heatmap PDF |
+| `plot_annotation` | `Plot_annotation.R` | `plots/annotations_averaged/{genome}/{feature}/{sample}.pdf` |
+
+**Key design decisions:**
+
+1. **`correlation` rule moved from phase2 → phase7**: Benchmark path changed from `benchmarks/phase2/correlation/` to `benchmarks/phase7/correlation/`. `SLURM_CONFIG.sh` is unaffected — it matches by rule name, which is unchanged.
+
+2. **`summary_histogram_plot` decoupled from `Make_histograms.sh`**: The `-p` flag (PDF generation) was removed from `Make_histograms.sh` to eliminate the R dependency from phase 1. PDFs are now generated in phase 7 by `Plot_summary_histograms.R`, which reads the `.txt` histogram files produced by phase 1. Five panels (RL, MAPQ, INS, DEL, COV) in a 2×3 grid at 6×7 inches.
+
+3. **Weighted winsorization in `Plot_summary_histograms.R`**: To clip outlier bins without expanding histogram data into individual rows, the script computes cumulative fractions from sorted `(value, count)` pairs to find the q01 and q99 bounds, then re-bins into 50 equal-width bins using `cut()`.
+
+4. **`summarize_correlation` input function**: Because the `summarize_correlation` rule output has a `{genome}` wildcard but the input must expand over all `RAW_SAMPLES` combinations, a helper function is required:
+   ```python
+   def get_correlation_files_for_summary(wildcards):
+       return expand(
+           "tables/correlation/{genome}/{raw_sample_a}_vs_{raw_sample_b}_{strand}.txt",
+           genome=wildcards.genome,
+           raw_sample_a=RAW_SAMPLES, raw_sample_b=RAW_SAMPLES,
+           strand=["for", "rev"]
+       )
+   ```
+   For-strand and rev-strand data are pooled per sample pair before computing Spearman and Pearson correlations.
+
+5. **`plot_annotation` strand handling**: The annotation data's internal `Strand` column (BED feature strand: `+`/`-`) is averaged away via `group_by(Distance, Sample, Genome_strand) %>% summarise(...)`. Only `Genome_strand` (forward/reverse, derived from the filename) determines the line type in the 3-panel plot (solid = forward, dotted = reverse). Colors: Treatment = black, Control = grey50.

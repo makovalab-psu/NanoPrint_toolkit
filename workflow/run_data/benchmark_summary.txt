@@ -1,24 +1,42 @@
 Benchmark Comparison
 
-benchmarks01 = chicken.v23 genome (large, 38+ chromosomes)
-benchmarks02 = test_genome (small test dataset)
+benchmarks03 = hg002v1.1_MATERNAL_chrY_chrM genome (human HG002, large dataset)
+benchmarks04 = chicken.v23 genome (Chicken Fibroblast, medium dataset)
 
-| Rule                      |    bench01 Total |   n |  bench01 Avg |    bench02 Total |   n |  bench02 Avg |
-|---------------------------|------------------|-----|--------------|------------------|-----|--------------|
-| alignment_stats           |        39m 51.4s |   2 |        19.9m |        26m 17.5s |   2 |        13.1m |
-| annotate_features         |   208h 31m 06.6s | 320 |        39.1m |     3h 39m 53.4s |   8 |        27.5m |
-| average_annotations       |                - |   - |            - |        11m 44.7s |   2 |         5.9m |
-| bedgraph_to_bigwig        |        10m 58.7s |  43 |        15.3s |        17m 42.0s |  24 |        44.2s |
-| calculate_reactivity      |     4h 52m 31.3s |  75 |         3.9m |     1h 09m 01.7s |   8 |         8.6m |
-| filter_alignments         |        32m 52.9s |   2 |        16.4m |        17m 14.0s |   2 |         8.6m |
-| genome_faidx              |                - |   - |            - |             2.1s |   1 |         2.1s |
-| map_reads                 |     5h 59m 17.1s |   2 |         3.0h |    13h 17m 01.4s |   2 |         6.6h |
-| merge_annotations         |                - |   - |            - |        35m 24.0s |   2 |        17.7m |
-| merge_bigwig              |                - |   - |            - |         1m 29.3s |   6 |        14.9s |
-| merge_density             |                - |   - |            - |             1.5s |  12 |         0.1s |
-| perbase_error             |    39h 33m 28.8s |   4 |         9.9h |     4h 12m 06.5s |   4 |         1.1h |
-| reactivity_density        |     1h 12m 36.5s | 141 |        30.9s |     1h 30m 23.2s |  48 |         1.9m |
-| reactivity_to_bedgraph    |     1h 21m 10.4s |  68 |         1.2m |        20m 31.7s |   8 |         2.6m |
-| read_stats                |    19h 17m 09.9s |   2 |         9.6h |     2h 25m 02.6s |   2 |         1.2h |
-| split_features_by_chr     |            15.6s |   7 |         2.2s |                - |   - |            - |
-| split_perbase_by_chr      |     2h 41m 15.5s |   4 |        40.3m |        16m 04.5s |   4 |         4.0m |
+Columns:
+  Total    - sum of wall-clock time across all jobs for that rule
+  n        - number of benchmark files (jobs)
+  Avg      - average wall-clock time per job
+  PeakRSS  - maximum max_rss (MB) observed across all jobs; '-' when OS sampling missed it
+  AvgLoad  - mean CPU load across all jobs (>100% = multithreaded)
+
+| Rule                        |          bench03 Total |     n |    bench03 Avg |   bench03 PeakRSS | bench03 AvgLoad |          bench04 Total |     n |    bench04 Avg |   bench04 PeakRSS | bench04 AvgLoad |
+| --------------------------- | ---------------------- | ----- | -------------- | ----------------- | --------------- | ---------------------- | ----- | -------------- | ----------------- | --------------- |
+| alignment_stats             |           8h 35m 44.3s |     5 |           1.7h |            6953MB |             88% |           1h 36m 46.4s |     2 |          48.4m |            6873MB |             90% |
+| alignment_stats_table       |                      - |     - |              - |                 - |               - |                      - |     - |              - |                 - |               - |
+| annotate_features           |         109h 50m 36.3s |   582 |          11.3m |            2580MB |             75% |         142h 16m 35.5s |   570 |          15.0m |            2148MB |             63% |
+| average_annotations         |           1h 11m 24.9s |    24 |           3.0m |              13MB |             70% |           1h 35m 35.1s |    14 |           6.8m |              13MB |            102% |
+| bedgraph_to_bigwig          |          61h 37m 20.4s |   300 |          12.3m |           17699MB |             61% |           8h 35m 50.8s |   125 |           4.1m |           11209MB |             54% |
+| calculate_reactivity        |          28h 22m 34.7s |   150 |          11.4m |              18MB |             69% |           4h 00m 09.8s |    82 |           2.9m |              17MB |             46% |
+| correlation                 |                      - |     - |              - |                 - |               - |                      - |     - |              - |                 - |               - |
+| filter_alignments           |           3h 29m 14.5s |     5 |          41.8m |              12MB |             91% |              42m 05.0s |     2 |          21.0m |              13MB |             98% |
+| igv_coverage_bigwig         |                   1.5s |    20 |           0.1s |               3MB |               - |                   0.6s |     8 |           0.1s |               3MB |               - |
+| igv_index_bam               |           1h 08m 38.9s |    20 |           3.4m |              72MB |             86% |              12m 05.9s |     8 |           1.5m |              32MB |             84% |
+| igv_split_bam               |           8h 14m 49.3s |    20 |          24.7m |               9MB |             93% |           1h 48m 43.0s |     8 |          13.6m |              10MB |             95% |
+| map_reads                   |           7h 52m 38.8s |     5 |           1.6h |           23603MB |            741% |           2h 19m 35.9s |     2 |           1.2h |           16836MB |            782% |
+| mean_bedgraph_to_bigwig     |               4m 28.3s |     6 |          44.7s |             284MB |             62% |                      - |     - |              - |                 - |               - |
+| mean_reactivity_bedgraph    |           4h 59m 07.7s |   150 |           2.0m |              20MB |             55% |                      - |     - |              - |                 - |               - |
+| merge_annotations           |           1h 06m 28.5s |    24 |           2.8m |              13MB |             65% |           1h 37m 27.5s |    14 |           7.0m |              13MB |             84% |
+| merge_bigwig                |           7h 38m 15.2s |    12 |          38.2m |           26065MB |             59% |           6h 13m 47.2s |     2 |           3.1h |           32189MB |             96% |
+| merge_density               |                   8.9s |     6 |           1.5s |               9MB |              0% |                      - |     - |              - |                 - |               - |
+| merge_mean_bedgraph         |                   6.0s |     5 |           1.2s |               9MB |              1% |                      - |     - |              - |                 - |               - |
+| perbase_error               |          72h 11m 02.9s |    10 |           7.2h |             685MB |            115% |          11h 52m 16.6s |     4 |           3.0h |             479MB |            150% |
+| plot_annotation             |                      - |     - |              - |                 - |               - |                      - |     - |              - |                 - |               - |
+| reactivity_density          |           2h 27m 00.1s |   150 |          58.8s |              25MB |             41% |           1h 12m 36.5s |   141 |          30.9s |                 - |             65% |
+| reactivity_to_bedgraph      |           8h 25m 34.8s |   150 |           3.4m |             193MB |             51% |           1h 36m 52.5s |    82 |           1.2m |             193MB |             39% |
+| read_stats                  |          41h 20m 53.9s |     5 |           8.3h |              52MB |             67% |          19h 17m 09.9s |     2 |           9.6h |                 - |            100% |
+| read_stats_table            |                      - |     - |              - |                 - |               - |                      - |     - |              - |                 - |               - |
+| split_features_by_chr       |                  53.9s |     4 |          13.5s |              26MB |             53% |                  18.1s |     7 |           2.6s |              30MB |             42% |
+| split_perbase_by_chr        |          39h 12m 22.1s |    10 |           3.9h |              46MB |             98% |           5h 15m 41.0s |     4 |           1.3h |              67MB |             99% |
+| summarize_correlation       |                      - |     - |              - |                 - |               - |                      - |     - |              - |                 - |               - |
+| summary_histogram_plot      |                      - |     - |              - |                 - |               - |                      - |     - |              - |                 - |               - |

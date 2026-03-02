@@ -125,12 +125,11 @@ rule alignment_stats:
 
 
 rule histograms:
-    """Extract histogram data and generate PDF plots from stats files."""
+    """Extract histogram data from samtools stats files."""
     input:
         stats="data/{alignment}/{genome}/{raw_sample}_stats.txt"
     output:
-        txt="data/{alignment}/{genome}/{raw_sample}_histograms.txt",
-        pdf="data/{alignment}/{genome}/{raw_sample}_histograms.pdf"
+        txt="data/{alignment}/{genome}/{raw_sample}_histograms.txt"
     log:
         "logs/histograms/{alignment}/{genome}/{raw_sample}.log"
     benchmark:
@@ -142,6 +141,5 @@ rule histograms:
         workflow/scripts/Make_histograms.sh \
             -i {input.stats} \
             -o {output.txt} \
-            -p {output.pdf} \
             2>&1 | tee {log}
         """

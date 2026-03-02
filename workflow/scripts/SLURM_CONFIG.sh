@@ -181,43 +181,75 @@ time_to_seconds() {
     esac
 }
 
+# Convert RSS strings (e.g., "6953MB") to integer MB
+rss_to_mb() {
+    local val="$1"
+    if [[ "$val" == "-" ]] || [[ -z "$val" ]]; then
+        echo "0"
+        return
+    fi
+    echo "${val%MB}" | tr -d ' ' | bc 2>/dev/null || echo "0"
+}
+
 ESTIMATED_SECONDS=0
+MAX_RSS_MB=0
+MAX_RSS_RULE=""
 
 if [[ -n "$BENCHMARK_FILE" ]] && [[ ${#DRY_RULES[@]} -gt 0 ]]; then
     echo ""
     echo "Estimating wall time from benchmark data..."
     echo ""
-    printf "  %-28s %6s  %12s  %12s\n" "Rule" "Jobs" "Avg/job" "Subtotal"
-    printf "  %-28s %6s  %12s  %12s\n" "----------------------------" "------" "------------" "------------"
+    printf "  %-28s %6s  %12s  %12s  %10s\n" "Rule" "Jobs" "Avg/job" "Subtotal" "PeakRSS"
+    printf "  %-28s %6s  %12s  %12s  %10s\n" "----------------------------" "------" "------------" "------------" "----------"
 
     # For each rule in the dry-run, look up benchmark averages
     for i in "${!DRY_RULES[@]}"; do
         rule="${DRY_RULES[$i]}"
         count="${DRY_COUNTS[$i]}"
 
-        # Extract bench01 and bench02 avg columns for this rule from the benchmark file.
-        # The table has columns: Rule | bench01 Total | n | bench01 Avg | bench02 Total | n | bench02 Avg
-        # bench01 Avg is column 4, bench02 Avg is column 7 (pipe-delimited)
+        # Extract bench03 and bench04 columns for this rule from the benchmark file.
+        # Table columns (pipe-delimited, 1-indexed with leading empty field):
+        #   2=Rule  3=bench03 Total  4=n  5=bench03 Avg  6=bench03 PeakRSS  7=bench03 AvgLoad
+        #           8=bench04 Total  9=n 10=bench04 Avg 11=bench04 PeakRSS 12=bench04 AvgLoad
         bench_line=$(grep "^| ${rule} " "$BENCHMARK_FILE" 2>/dev/null || grep "^| ${rule}[[:space:]]" "$BENCHMARK_FILE" 2>/dev/null || echo "")
 
         avg_seconds=0
         avg_display="unknown"
+        peak_rss_display="-"
 
         if [[ -n "$bench_line" ]]; then
             # Parse pipe-delimited columns
-            bench01_avg=$(echo "$bench_line" | awk -F'|' '{print $5}' | tr -d ' ')
-            bench02_avg=$(echo "$bench_line" | awk -F'|' '{print $8}' | tr -d ' ')
+            bench03_avg=$(echo "$bench_line" | awk -F'|' '{print $5}' | tr -d ' ')
+            bench03_rss=$(echo "$bench_line" | awk -F'|' '{print $6}' | tr -d ' ')
+            bench04_avg=$(echo "$bench_line" | awk -F'|' '{print $10}' | tr -d ' ')
+            bench04_rss=$(echo "$bench_line" | awk -F'|' '{print $11}' | tr -d ' ')
 
-            bench01_sec=$(time_to_seconds "$bench01_avg")
-            bench02_sec=$(time_to_seconds "$bench02_avg")
+            bench03_sec=$(time_to_seconds "$bench03_avg")
+            bench04_sec=$(time_to_seconds "$bench04_avg")
 
             # Use the maximum of the two as conservative estimate
-            if (( $(echo "$bench01_sec > $bench02_sec" | bc -l) )); then
-                avg_seconds="$bench01_sec"
-                avg_display="$bench01_avg"
+            if (( $(echo "$bench03_sec > $bench04_sec" | bc -l) )); then
+                avg_seconds="$bench03_sec"
+                avg_display="$bench03_avg"
             else
-                avg_seconds="$bench02_sec"
-                avg_display="$bench02_avg"
+                avg_seconds="$bench04_sec"
+                avg_display="$bench04_avg"
+            fi
+
+            # Track peak RSS: use the larger of bench03/bench04
+            bench03_rss_mb=$(rss_to_mb "$bench03_rss")
+            bench04_rss_mb=$(rss_to_mb "$bench04_rss")
+            if (( $(echo "$bench03_rss_mb > $bench04_rss_mb" | bc -l) )); then
+                rule_rss_mb="$bench03_rss_mb"
+                peak_rss_display="$bench03_rss"
+            else
+                rule_rss_mb="$bench04_rss_mb"
+                peak_rss_display="$bench04_rss"
+            fi
+
+            if (( $(echo "$rule_rss_mb > $MAX_RSS_MB" | bc -l) )); then
+                MAX_RSS_MB="$rule_rss_mb"
+                MAX_RSS_RULE="$rule"
             fi
         fi
 
@@ -236,7 +268,7 @@ if [[ -n "$BENCHMARK_FILE" ]] && [[ ${#DRY_RULES[@]} -gt 0 ]]; then
             sub_display="${subtotal}s"
         fi
 
-        printf "  %-28s %6d  %12s  %12s\n" "$rule" "$count" "$avg_display" "$sub_display"
+        printf "  %-28s %6d  %12s  %12s  %10s\n" "$rule" "$count" "$avg_display" "$sub_display" "$peak_rss_display"
     done
 
     echo ""
@@ -266,6 +298,23 @@ if [[ -n "$BENCHMARK_FILE" ]] && [[ ${#DRY_RULES[@]} -gt 0 ]]; then
     echo "  Total serial time:    ~${serial_h} hours"
     echo "  Parallel (${CORES} cores): ~${parallel_h} hours"
     echo "  With 20% margin:     ${WALL_HOURS} hours"
+
+    # Memory summary
+    if [[ "$MAX_RSS_MB" -gt 0 ]]; then
+        echo ""
+        echo "Peak memory requirements:"
+        # Compute minimum cores needed at 8 GB/core (8192 MB/core)
+        min_cores_mem=$(echo "($MAX_RSS_MB + 8191) / 8192" | bc)
+        [[ "$min_cores_mem" -lt 1 ]] && min_cores_mem=1
+        echo "  Rule with max RSS:  ${MAX_RSS_RULE} (${MAX_RSS_MB}MB)"
+        echo "  Min cores for mem:  ${min_cores_mem} (at 8GB/core on standard partition)"
+        total_mem_gb=$(( CORES * 8 ))
+        if [[ "$CORES" -lt "$min_cores_mem" ]]; then
+            echo "  WARNING: --cores ${CORES} provides ${total_mem_gb}GB; ${MAX_RSS_RULE} may need $((min_cores_mem * 8))GB"
+        else
+            echo "  --cores ${CORES} provides ${total_mem_gb}GB -- sufficient"
+        fi
+    fi
 else
     # No benchmarks available - use a safe default
     WALL_HOURS=48

@@ -322,6 +322,119 @@ Distance	Coverage	Perbase_error	Reactivity	Sample	Strand
 
 ---
 
+## Read Statistics Table
+
+### Description
+Aggregated read statistics from all samples in a single CSV table. Each row is one sample.
+
+### Format
+CSV with header:
+| Column | Name | Description |
+|--------|------|-------------|
+| 1 | Sample | Sample name |
+| 2 | Giga_bp | Total gigabases sequenced |
+| 3 | Reads_million | Total reads in millions |
+| 4 | N50 | Read length N50 (bp) |
+| 5 | Q50 | Read quality Q50 (mean Phred at 50% of bases) |
+
+### Example
+```
+Sample,Giga_bp,Reads_million,N50,Q50
+Hsap_HG002_LCL_Mn04,12.34,0.82,18523,17
+Hsap_HG002_LCL_CTRL,11.89,0.79,17891,16
+```
+
+### Location
+`tables/read_stats_table.csv`
+
+---
+
+## Alignment Statistics Table
+
+### Description
+Aggregated alignment statistics from all samples in a single CSV table. Each sample produces two rows: one for raw (not filtered) alignments and one for quality-filtered alignments.
+
+### Format
+CSV with header:
+| Column | Name | Description |
+|--------|------|-------------|
+| 1 | Sample | Sample name |
+| 2 | Filter_status | `Not_filtered` (raw) or `Filtered` |
+| 3 | Total_sequences | Number of reads |
+| 4 | Total_length | Total bases aligned |
+| 5 | Bases_mapped | Bases mapped to reference |
+| 6 | Bases_mapped_cigar | Bases mapped (CIGAR-based) |
+| 7 | Mismatches | Total mismatches |
+| 8 | Error_rate | Per-base error rate |
+| 9 | Average_length | Mean read length |
+| 10 | Average_quality | Mean base quality |
+| 11 | Primary_alignments | Primary alignment count |
+| 12 | Secondary_alignments | Secondary alignment count |
+| 13 | Supplementary_alignments | Supplementary alignment count |
+
+### Location
+`tables/alignment_stats_table.csv`
+
+---
+
+## Histogram PDFs
+
+### Description
+5-panel histogram PDFs showing alignment quality distributions for each sample and alignment type. Panels: Read Length (RL), Mapping Quality (MAPQ), Insertion size (INS), Deletion size (DEL), and Coverage (COV). Values are winsorized to 1st–99th percentile and re-binned into 50 uniform bins.
+
+### Format
+PDF (6×7 inches, 2-column × 3-row grid)
+
+### Location
+`plots/histograms/{alignment}/{genome}/{raw_sample}_histograms.pdf`
+
+---
+
+## Pairwise Correlation Table
+
+### Description
+Pairwise Spearman and Pearson correlations between all sample pairs. For each pair, both forward and reverse strand data are pooled before computing the correlation coefficients.
+
+### Format
+CSV with header:
+| Column | Name | Description |
+|--------|------|-------------|
+| 1 | Sample_A | First sample name |
+| 2 | Sample_B | Second sample name |
+| 3 | Spearman | Spearman rank correlation (−1 to 1) |
+| 4 | Pearson | Pearson correlation coefficient (−1 to 1) |
+
+### Location
+`tables/perbase_error_correlation/{genome}/Pairwise_correlation_table.csv`
+
+---
+
+## Pairwise Correlation Heatmap
+
+### Description
+Dual heatmap PDF displaying Spearman (left panel) and Pearson (right panel) pairwise correlation coefficients for all sample pairs. Values annotated in each tile. Color scale: turbo palette from −1 (blue) to 1 (red).
+
+### Format
+PDF (6×5 inches, two panels side-by-side)
+
+### Location
+`plots/perbase_error_correlation/{genome}/Pairwise_correlation_heatmap.pdf`
+
+---
+
+## Feature Annotation Plot
+
+### Description
+3-panel line plot PDF showing mean signal as a function of distance from genomic features. Panel 1: mean coverage. Panel 2: per-base error rate. Panel 3: reactivity. Lines are colored by Sample (Treatment=black, Control=grey) and styled by genome strand (forward=solid, reverse=dotted).
+
+### Format
+PDF (6×5 inches, 3 panels in a single row)
+
+### Location
+`plots/annotations_averaged/{genome}/{feature}/{sample}.pdf`
+
+---
+
 # Dependencies
 
 All dependencies can be installed via conda:
@@ -338,7 +451,7 @@ conda activate nanoprint
 | Genomic intervals | bedtools, ucsc-bedgraphtobigwig, ucsc-bigwigtobedgraph |
 | Text processing | gawk, bc |
 | Languages | python (>=3.8), R |
-| R packages | ggplot2, dplyr |
+| R packages | ggplot2, dplyr, gridExtra |
 
 # Instructions
 
@@ -601,6 +714,56 @@ free `open` partition, while a paid allocation ID routes to `sla-prio` with `--a
                               │ 21. average_annotations       │
                               │(average_feature_annotation.sh)│
                               └───────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────┐
+│                     PHASE 7: SUMMARY TABLES & PLOTS                  │
+└──────────────────────────────────────────────────────────────────────┘
+
+   tables/read_stats/                  tables/alignment_stats/
+         │                                      │
+         ▼                                      ▼
+┌──────────────────────┐             ┌──────────────────────────┐
+│ 25. read_stats_table │             │ 26. alignment_stats_table │
+│ (read_stats_table.sh)│             │(alignment_stats_table.sh) │
+└──────────┬───────────┘             └────────────┬─────────────┘
+           │                                      │
+           ▼                                      ▼
+  tables/read_stats_table.csv    tables/alignment_stats_table.csv
+
+   data/{alignment}/{genome}/{raw_sample}_histograms.txt
+                          │
+                          ▼
+              ┌────────────────────────────────────┐
+              │      27. summary_histogram_plot     │
+              │     (Plot_summary_histograms.R)     │
+              └────────────────────────────────────┘
+                          │
+                          ▼
+        plots/histograms/{alignment}/{genome}/{raw_sample}.pdf
+
+          tables/correlation/{genome}/
+                          │
+                          ▼
+              ┌────────────────────────────┐
+              │ 28. summarize_correlation  │
+              │  (Summarize_correlation.R) │
+              └────────────┬───────────────┘
+                           │
+              ┌────────────┴──────────────┐
+              ▼                           ▼
+  tables/perbase_error_correlation/  plots/perbase_error_correlation/
+         Pairwise_correlation_table.csv   Pairwise_correlation_heatmap.pdf
+
+       data/annotations_averaged/{genome}/{feature}/
+                          │
+                          ▼
+              ┌────────────────────────────┐
+              │     29. plot_annotation    │
+              │      (Plot_annotation.R)   │
+              └────────────────────────────┘
+                          │
+                          ▼
+        plots/annotations_averaged/{genome}/{feature}/{sample}.pdf
 ```
 
 # Commands
@@ -783,7 +946,7 @@ Example:
 
 ## 5. histograms
 
-**Description:** Extract histogram data and generate PDF plots from stats files.
+**Description:** Extract histogram data from samtools stats output.
 
 **Script:** `workflow/scripts/Make_histograms.sh`
 
@@ -792,16 +955,14 @@ Example:
 
 **Outputs:**
 - `data/{alignment}/{genome}/{sample}_histograms.txt`
-- `data/{alignment}/{genome}/{sample}_histograms.pdf`
 
 **Dependencies:**
 - gawk
-- R (with ggplot2 for PDF output)
 
 **Documentation:**
 
 ```
-Usage: Make_histograms.sh -i <input_stats.txt> -o <output_histograms.txt> [-p <output_histograms.pdf>]
+Usage: Make_histograms.sh -i <input_stats.txt> -o <output_histograms.txt>
 
 Extract histogram data from samtools stats output files.
 
@@ -810,7 +971,6 @@ Required arguments:
     -o    Output histogram file (tab-delimited)
 
 Optional arguments:
-    -p    Output PDF file with histogram plots
     -h    Show this help message
 
 Output format (tab-delimited with header):
@@ -827,7 +987,6 @@ Histogram types extracted:
 
 Example:
     Make_histograms.sh -i sample_stats.txt -o sample_histograms.txt
-    Make_histograms.sh -i sample_stats.txt -o sample_histograms.txt -p sample_histograms.pdf
 ```
 
 ---
@@ -1648,6 +1807,246 @@ Enabled by adding `^igv-bam` to CONFIG. Uses `samtools index`.
 
 **Usage:**
 Enabled by adding `^igv-bigwig` to CONFIG. Generates coverage bedGraph via `bedtools genomecov -ibam -bg`, then converts to bigWig with `bedGraphToBigWig`. Creates an empty file if the BAM has no reads.
+
+---
+
+## 25. read_stats_table
+
+**Description:** Combine per-sample read statistics into a single CSV table.
+
+**Script:** `workflow/scripts/read_stats_table.sh`
+
+**Inputs:**
+- `tables/read_stats/{raw_sample}.txt` (all samples)
+
+**Outputs:**
+- `tables/read_stats_table.csv`
+
+**Dependencies:**
+- gawk
+
+**Documentation:**
+
+```
+Usage: read_stats_table.sh -o <output.csv> <input1.txt> [input2.txt ...]
+
+Combine per-sample read statistics into a single CSV table.
+
+Required arguments:
+    -o    Output CSV file
+
+Positional arguments:
+    One or more read_stats txt files (tab-delimited, output of Read_stats.sh)
+
+Output format (CSV with header):
+    Sample, Giga_bp, Reads_million, N50, Q50
+
+Example:
+    read_stats_table.sh -o tables/read_stats_table.csv \
+        tables/read_stats/sample1.txt tables/read_stats/sample2.txt
+```
+
+---
+
+## 26. alignment_stats_table
+
+**Description:** Combine per-sample alignment statistics into a single CSV table (two rows per sample: raw and filtered).
+
+**Script:** `workflow/scripts/alignment_stats_table.sh`
+
+**Inputs:**
+- `tables/alignment_stats/{genome}/{raw_sample}.txt` (all samples)
+
+**Outputs:**
+- `tables/alignment_stats_table.csv`
+
+**Dependencies:**
+- gawk
+
+**Documentation:**
+
+```
+Usage: alignment_stats_table.sh -o <output.csv> <input1.txt> [input2.txt ...]
+
+Combine per-sample alignment statistics into a single CSV table.
+Each input file produces two rows: one for raw alignments, one for filtered.
+
+Required arguments:
+    -o    Output CSV file
+
+Positional arguments:
+    One or more alignment_stats txt files (tab-delimited, output of Alignment_stats.sh)
+
+Input format (tab-delimited):
+    Sample  Statistic  Raw_alignment  Filtered_alignment
+
+Output format (CSV with header):
+    Sample, Filter_status, Total_sequences, Total_length, Bases_mapped,
+    Bases_mapped_cigar, Mismatches, Error_rate, Average_length, Average_quality,
+    Primary_alignments, Secondary_alignments, Supplementary_alignments
+
+Filter_status values:
+    Not_filtered  - Raw alignment statistics
+    Filtered      - Quality-filtered alignment statistics
+
+Example:
+    alignment_stats_table.sh -o tables/alignment_stats_table.csv \
+        tables/alignment_stats/genome1/sample1.txt \
+        tables/alignment_stats/genome1/sample2.txt
+```
+
+---
+
+## 27. summary_histogram_plot
+
+**Description:** Generate 5-panel histogram PDF from samtools histogram data (Read Length, MAPQ, Insertion size, Deletion size, Coverage).
+
+**Script:** `workflow/scripts/Plot_summary_histograms.R`
+
+**Inputs:**
+- `data/{alignment}/{genome}/{raw_sample}_histograms.txt`
+
+**Outputs:**
+- `plots/histograms/{alignment}/{genome}/{raw_sample}_histograms.pdf`
+
+**Dependencies:**
+- R with ggplot2, dplyr, gridExtra
+
+**Documentation:**
+
+```
+Usage: Rscript Plot_summary_histograms.R <input_histograms.txt> <output.pdf>
+
+Generate a 5-panel histogram PDF from alignment histogram data.
+
+Arguments:
+    1    Input histogram file (tab-delimited, from Make_histograms.sh)
+    2    Output PDF file
+
+Input format (tab-delimited with header):
+    Var    - Histogram type (RL, MAPQ, INS, DEL, COV)
+    Value  - Bin value
+    Count  - Count for that bin
+
+Output:
+    PDF (6×7 inches) with 5 panels arranged in a 2-column × 3-row grid:
+        RL   - Read Length distribution
+        MAPQ - Mapping Quality distribution
+        INS  - Insertion size distribution
+        DEL  - Deletion size distribution
+        COV  - Coverage distribution
+    Each panel applies 99% winsorization and 50-bin re-binning.
+
+Example:
+    Rscript Plot_summary_histograms.R sample_histograms.txt sample_histograms.pdf
+```
+
+---
+
+## 28. summarize_correlation
+
+**Description:** Compute pairwise Spearman/Pearson correlations from all per-sample-pair correlation files and generate a dual heatmap PDF.
+
+**Script:** `workflow/scripts/Summarize_correlation.R`
+
+**Inputs:**
+- `tables/correlation/{genome}/{raw_sample_a}_vs_{raw_sample_b}_{strand}.txt` (all pairs and strands)
+
+**Outputs:**
+- `tables/perbase_error_correlation/{genome}/Pairwise_correlation_table.csv`
+- `plots/perbase_error_correlation/{genome}/Pairwise_correlation_heatmap.pdf`
+
+**Dependencies:**
+- R with ggplot2, dplyr, gridExtra
+
+**Documentation:**
+
+```
+Usage: Rscript Summarize_correlation.R <out_table.csv> <out_plot.pdf> <input1.txt> [input2.txt ...]
+
+Compute pairwise Spearman and Pearson correlations and generate heatmap plots.
+
+Arguments:
+    1    Output CSV table
+    2    Output PDF heatmap
+    3+   Input correlation files (output of Correlation.sh, any number)
+
+Input format (tab-delimited with header):
+    Chromosome, Nucleotide, Perbase_error_1, Perbase_error_2, Coverage_1, Coverage_2
+
+Output table (CSV):
+    Sample_A, Sample_B, Spearman, Pearson
+
+Output plot (PDF, 6×5 inches):
+    Two-panel heatmap: Spearman correlation (left) and Pearson correlation (right).
+    Values annotated in each tile. Color scale: turbo palette from -1 to 1.
+
+Notes:
+    - Both forward and reverse strand files for each pair are pooled before computing
+      correlation coefficients.
+    - Sample names are parsed from filenames: {sample_a}_vs_{sample_b}_{strand}.txt
+
+Example:
+    Rscript Summarize_correlation.R \
+        tables/perbase_error_correlation/genome/Pairwise_correlation_table.csv \
+        plots/perbase_error_correlation/genome/Pairwise_correlation_heatmap.pdf \
+        tables/correlation/genome/sample1_vs_sample2_for.txt \
+        tables/correlation/genome/sample1_vs_sample2_rev.txt
+```
+
+---
+
+## 29. plot_annotation
+
+**Description:** Plot mean coverage, per-base error, and reactivity as a function of distance from genomic features.
+
+**Script:** `workflow/scripts/Plot_annotation.R`
+
+**Inputs:**
+- `data/annotations_averaged/{genome}/{feature}/{sample}_for.txt.gz`
+- `data/annotations_averaged/{genome}/{feature}/{sample}_rev.txt.gz`
+
+**Outputs:**
+- `plots/annotations_averaged/{genome}/{feature}/{sample}.pdf`
+
+**Dependencies:**
+- R with ggplot2, dplyr, gridExtra
+
+**Documentation:**
+
+```
+Usage: Rscript Plot_annotation.R <forward.txt.gz> <reverse.txt.gz> <output.pdf>
+
+Generate a 3-panel line plot PDF from averaged annotation files.
+
+Arguments:
+    1    Forward strand averaged annotation file (gzipped)
+    2    Reverse strand averaged annotation file (gzipped)
+    3    Output PDF file
+
+Input format (tab-delimited, gzipped, with header):
+    Distance, Coverage, Perbase_error, Reactivity, Sample, Strand
+
+Output (PDF, 6×5 inches, 3 panels in a single row):
+    Panel 1: Mean Coverage vs distance
+    Panel 2: Per-Base Error vs distance
+    Panel 3: Reactivity vs distance
+
+Aesthetics:
+    Color:    Treatment = black, Control = grey
+    Linetype: Forward strand = solid, Reverse strand = dotted
+
+Notes:
+    - The BED feature strand column (+ / -) is averaged away; only the genome
+      strand (forward/reverse, from filename) affects line style.
+    - Reactivity is only plotted for Treatment rows.
+
+Example:
+    Rscript Plot_annotation.R \
+        data/annotations_averaged/genome/feature/sample_for.txt.gz \
+        data/annotations_averaged/genome/feature/sample_rev.txt.gz \
+        plots/annotations_averaged/genome/feature/sample.pdf
+```
 
 ---
 

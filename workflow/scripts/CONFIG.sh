@@ -427,6 +427,7 @@ include: "workflow/rules/phase3_reactivity.smk"
 include: "workflow/rules/phase4_analysis.smk"
 include: "workflow/rules/phase5_annotate_features.smk"
 include: "workflow/rules/phase6_igv.smk"
+include: "workflow/rules/phase7_summary_tables_plots.smk"
 include: "genome_specific_rules.smk"
 
 # ============================================================================
@@ -483,6 +484,28 @@ rule all:
         expand("results/igv/{igv_source}/{genome}/{raw_sample}_{strand}.bw",
                igv_source=IGV_SOURCES, genome=GENOMES, raw_sample=RAW_SAMPLES, strand=STRANDS)
         if IGV_BIGWIG else [],
+
+        # Phase 7: Read statistics table
+        "tables/read_stats_table.csv",
+
+        # Phase 7: Alignment statistics table
+        "tables/alignment_stats_table.csv",
+
+        # Phase 7: Summary histograms (raw and filtered alignments, per genome per sample)
+        expand("plots/histograms/{alignment}/{genome}/{raw_sample}_histograms.pdf",
+               alignment=["aligned_reads", "filtered_alignments"],
+               genome=GENOMES, raw_sample=RAW_SAMPLES),
+
+        # Phase 7: Pairwise per-base error correlation tables and heatmaps (per genome)
+        expand("tables/perbase_error_correlation/{genome}/Pairwise_correlation_table.csv",
+               genome=GENOMES),
+        expand("plots/perbase_error_correlation/{genome}/Pairwise_correlation_heatmap.pdf",
+               genome=GENOMES),
+
+        # Phase 7: Feature annotation plots (per genome per feature per sample)
+        expand("plots/annotations_averaged/{genome}/{feature}/{sample}.pdf",
+               genome=GENOMES, feature=FEATURES, sample=SAMPLES)
+        if FEATURES else [],
 
 EOF
 
