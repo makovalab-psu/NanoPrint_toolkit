@@ -90,7 +90,7 @@ base_theme <- theme_classic(base_size = 6) +
     strip.text      = element_text(size = 6, color = "black"),
     axis.line       = element_line(color = "black"),
     axis.ticks      = element_line(color = "black"),
-    legend.position = "bottom"
+    legend.position = "none"
   )
 
 # ── Panel 1: Mean coverage ────────────────────────────────────────────────────
@@ -126,10 +126,16 @@ p3 <- ggplot(dat_react,
   labs(title = "Reactivity", x = "Distance (bp)", y = "Reactivity") +
   base_theme
 
-# ── Render PDF: 6 × 5 inches, three panels in one row ────────────────────────
+# Move legend to right side of the Reactivity panel only (single vertical column)
+p3 <- p3 + theme(
+  legend.position  = "right",
+  legend.direction = "vertical"
+)
+
+# ── Render PDF: 7 × 3 inches, three panels in one row ────────────────────────
 dir.create(dirname(out_pdf), recursive = TRUE, showWarnings = FALSE)
-pdf(out_pdf, width = 6, height = 5)
-grid.arrange(p1, p2, p3, ncol = 3, nrow = 1)
+pdf(out_pdf, width = 7, height = 3)
+grid.arrange(p1, p2, p3, ncol = 3, nrow = 1, widths = c(1, 1, 1.4))
 dev.off()
 
 cat("PDF written to:", out_pdf, "\n")

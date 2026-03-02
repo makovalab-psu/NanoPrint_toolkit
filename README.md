@@ -428,7 +428,7 @@ PDF (6×5 inches, two panels side-by-side)
 3-panel line plot PDF showing mean signal as a function of distance from genomic features. Panel 1: mean coverage. Panel 2: per-base error rate. Panel 3: reactivity. Lines are colored by Sample (Treatment=black, Control=grey) and styled by genome strand (forward=solid, reverse=dotted).
 
 ### Format
-PDF (6×5 inches, 3 panels in a single row)
+PDF (7×3 inches, 3 panels in a single row; legend on right of Reactivity panel)
 
 ### Location
 `plots/annotations_averaged/{genome}/{feature}/{sample}.pdf`
@@ -2027,7 +2027,7 @@ Arguments:
 Input format (tab-delimited, gzipped, with header):
     Distance, Coverage, Perbase_error, Reactivity, Sample, Strand
 
-Output (PDF, 6×5 inches, 3 panels in a single row):
+Output (PDF, 7×3 inches, 3 panels in a single row; legend on right of Reactivity panel):
     Panel 1: Mean Coverage vs distance
     Panel 2: Per-Base Error vs distance
     Panel 3: Reactivity vs distance
