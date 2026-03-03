@@ -126,16 +126,16 @@ p3 <- ggplot(dat_react,
   labs(title = "Reactivity", x = "Distance (bp)", y = "Reactivity") +
   base_theme
 
-# Move legend to right side of the Reactivity panel only (single vertical column)
-p3 <- p3 + theme(
-  legend.position  = "right",
+# Move legend to left side of the Coverage panel only (single vertical column)
+p1 <- p1 + theme(
+  legend.position  = "left",
   legend.direction = "vertical"
 )
 
 # ── Render PDF: 7 × 3 inches, three panels in one row ────────────────────────
 dir.create(dirname(out_pdf), recursive = TRUE, showWarnings = FALSE)
 pdf(out_pdf, width = 7, height = 3)
-grid.arrange(p1, p2, p3, ncol = 3, nrow = 1, widths = c(1, 1, 1.4))
+grid.arrange(p1, p2, p3, ncol = 3, nrow = 1, widths = c(1.4, 1, 1))
 dev.off()
 
 cat("PDF written to:", out_pdf, "\n")
