@@ -116,7 +116,7 @@ cat("Table written to:", out_table, "\n")
 base_theme <- theme_classic(base_size = 6) +
   theme(
     text            = element_text(size = 6, color = "black"),
-    axis.text       = element_text(size = 6, color = "black"),
+    axis.text.y     = element_blank(),
     axis.text.x     = element_text(size = 6, color = "black",
                                    angle = 45, hjust = 1, vjust = 1),
     axis.title      = element_text(size = 6, color = "black"),
@@ -125,7 +125,7 @@ base_theme <- theme_classic(base_size = 6) +
     plot.title      = element_text(size = 6, color = "black", hjust = 0.5),
     strip.text      = element_text(size = 6, color = "black"),
     legend.position = "bottom",
-    legend.key.width = unit(1, "cm")
+    legend.key.width = unit(0.5, "cm")
   )
 
 # ── Heatmap factory ───────────────────────────────────────────────────────────
