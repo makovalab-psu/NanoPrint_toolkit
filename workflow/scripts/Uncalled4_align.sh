@@ -6,6 +6,9 @@
 # Map_reads.sh preserves these tags via samtools fastq -T "mv,ts,pi,sp,ns" + minimap2 -y.
 # Produces a BAM with signal-level DTW alignment data.
 #
+# --min-aln-length 50: uncalled4 default is ~200 bp (for WGS). Short synthetic targets
+# (G4 oligos ~86-89 bp) would all fail the default threshold. 50 bp works for both.
+#
 # Usage: Uncalled4_align.sh -i <filtered_alignments.bam> -p <pod5_path> -g <genome.fa> -o <out.bam> [-t <threads>]
 #
 # Pod5 path may be a single .pod5 file or a directory. For directories, the script
@@ -120,11 +123,12 @@ fi
 # uncalled4 returns non-zero when any reads fail DTW (even if most succeed).
 # Use || true and verify the output is non-empty (pattern from js4007/Snakefile).
 uncalled4 align \
-    --bam-in "$INPUT_BAM" \
-    --ref    "$GENOME" \
-    --reads  "$POD5_INPUT" \
-    -p       "$THREADS" \
-    -o       "$OUTPUT" || true
+    --bam-in         "$INPUT_BAM" \
+    --ref            "$GENOME" \
+    --reads          "$POD5_INPUT" \
+    -p               "$THREADS" \
+    --min-aln-length 50 \
+    -o               "$OUTPUT" || true
 
 if [[ ! -f "$OUTPUT" ]]; then
     echo "Error: Uncalled4 produced no BAM output" >&2
