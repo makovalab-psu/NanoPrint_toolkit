@@ -75,10 +75,13 @@ echo "Output:  $OUTPUT"
 echo "Threads: $THREADS"
 echo ""
 
+DORADO_FLAGS=(--emit-moves)
+[[ -d "$INPUT" ]] && DORADO_FLAGS+=(--recursive)
+
 dorado basecaller \
     "$MODEL" \
     "$INPUT" \
-    --emit-moves \
+    "${DORADO_FLAGS[@]}" \
     > "$OUTPUT"
 
 echo ""
