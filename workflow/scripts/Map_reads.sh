@@ -13,30 +13,23 @@ usage() {
 }
 
 # Parse command line arguments
+INPUT_FILE=""
+OUTPUT_FILE=""
+GENOME_FILE=""
+TMP_DIR=""
+THREADS=""
+
 while getopts ":i:o:g:T:t:" opt; do
     case ${opt} in
-        i )
-            INPUT_FILE=$OPTARG
-            ;;
-        o )
-            OUTPUT_FILE=$OPTARG
-            ;;
-        g )
-            GENOME_FILE=$OPTARG
-            ;;
-        T )
-            TMP_DIR=$OPTARG
-            ;;
-        t )
-            THREADS=$OPTARG
-            ;;
-        \? )
-            usage
-            ;;
+        i ) INPUT_FILE=$OPTARG ;;
+        o ) OUTPUT_FILE=$OPTARG ;;
+        g ) GENOME_FILE=$OPTARG ;;
+        T ) TMP_DIR=$OPTARG ;;
+        t ) THREADS=$OPTARG ;;
+        \? ) usage ;;
     esac
 done
 
-# Default to 1 thread if not specified
 THREADS="${THREADS:-1}"
 
 # Check if all mandatory arguments are provided
@@ -67,6 +60,9 @@ if [[ -z "$TMP_DIR" ]]; then
 fi
 mkdir -p "$TMP_DIR"
 
+cleanup() { [[ -d "$TMP_DIR" ]] && rm -rf "$TMP_DIR"; }
+trap cleanup EXIT
+
 # Map reads and output to BAM format
 # BAM input: pipe samtools fastq (preserving dorado tags) → minimap2 -y (propagate tags) → sort
 # FASTQ input: pipe minimap2 → sort directly
@@ -83,12 +79,4 @@ else
 fi
 
 echo "Mapping completed. Sorted BAM file available at ${OUTPUT_FILE}."
-
-# Cleanup function
-cleanup() {
-    if [[ -d "$TMP_DIR" ]]; then
-        rm -rf "$TMP_DIR"
-    fi
-}
-trap cleanup EXIT
 
