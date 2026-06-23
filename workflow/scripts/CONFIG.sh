@@ -51,6 +51,8 @@ declare -a SIG_LEVELS=()
 declare -a SAMPLES=()
 declare -a TREATMENTS=()
 declare -a CONTROLS=()
+declare -a TREATMENT_PATHS=()
+declare -a CONTROL_PATHS=()
 declare -a TEMP_DIRS=()
 IGV_BAM="false"
 IGV_BIGWIG="false"
@@ -123,17 +125,20 @@ while IFS= read -r line || [[ -n "$line" ]]; do
                 SIG_LEVELS+=("$value")
                 ;;
             "^r")
-                # Relationship: sample, treatment, control
+                # Relationship: sample, treatment path, control path
+                # treatment/control fields are absolute or relative paths (file or directory).
+                # raw_sample name = basename of the path minus any recognized extension.
                 sample=$(echo "$values" | cut -f1)
-                treatment=$(echo "$values" | cut -f2)
-                control=$(echo "$values" | cut -f3)
-                # Strip extensions
-                sample=$(strip_ext "$sample")
-                treatment=$(strip_ext "$treatment")
-                control=$(strip_ext "$control")
+                treatment_raw=$(echo "$values" | cut -f2)
+                control_raw=$(echo "$values" | cut -f3)
+                # Strip trailing slash, then derive name from basename
+                treatment=$(strip_ext "$(basename "${treatment_raw%/}")")
+                control=$(strip_ext "$(basename "${control_raw%/}")")
                 SAMPLES+=("$sample")
                 TREATMENTS+=("$treatment")
                 CONTROLS+=("$control")
+                TREATMENT_PATHS+=("${treatment_raw%/}")
+                CONTROL_PATHS+=("${control_raw%/}")
                 ;;
             "^t")
                 # Temporary directory pattern
@@ -155,15 +160,56 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     fi
 done < "$CONFIG_FILE"
 
-# Collect all raw samples (unique treatment + control samples)
+# Build RAW_PATH_KEYS/VALS: raw_sample name -> input path (before dedup)
+declare -a RAW_PATH_KEYS=()
+declare -a RAW_PATH_VALS=()
+for i in "${!TREATMENTS[@]}"; do
+    RAW_PATH_KEYS+=("${TREATMENTS[$i]}")
+    RAW_PATH_VALS+=("${TREATMENT_PATHS[$i]}")
+done
+for i in "${!CONTROLS[@]}"; do
+    RAW_PATH_KEYS+=("${CONTROLS[$i]}")
+    RAW_PATH_VALS+=("${CONTROL_PATHS[$i]}")
+done
+
+# Collision check: same raw_sample name from two different paths is an error
+for i in "${!RAW_PATH_KEYS[@]}"; do
+    for j in "${!RAW_PATH_KEYS[@]}"; do
+        if [[ "$i" -lt "$j" && "${RAW_PATH_KEYS[$i]}" == "${RAW_PATH_KEYS[$j]}" ]]; then
+            if [[ "${RAW_PATH_VALS[$i]}" != "${RAW_PATH_VALS[$j]}" ]]; then
+                echo "Error: raw_sample name '${RAW_PATH_KEYS[$i]}' is derived from two different paths:" >&2
+                echo "  ${RAW_PATH_VALS[$i]}" >&2
+                echo "  ${RAW_PATH_VALS[$j]}" >&2
+                echo "Rename one of the input files or directories to resolve the conflict." >&2
+                exit 1
+            fi
+        fi
+    done
+done
+
+# Deduplicate RAW_PATH_KEYS/VALS (keep first occurrence of each name)
+declare -a UNIQUE_PATH_KEYS=()
+declare -a UNIQUE_PATH_VALS=()
+for i in "${!RAW_PATH_KEYS[@]}"; do
+    found="false"
+    for k in "${UNIQUE_PATH_KEYS[@]+"${UNIQUE_PATH_KEYS[@]}"}"; do
+        if [[ "$k" == "${RAW_PATH_KEYS[$i]}" ]]; then
+            found="true"
+            break
+        fi
+    done
+    if [[ "$found" == "false" ]]; then
+        UNIQUE_PATH_KEYS+=("${RAW_PATH_KEYS[$i]}")
+        UNIQUE_PATH_VALS+=("${RAW_PATH_VALS[$i]}")
+    fi
+done
+
+# Collect all raw samples (unique treatment + control names)
 declare -a RAW_SAMPLES=()
-for t in "${TREATMENTS[@]}"; do
-    RAW_SAMPLES+=("$t")
+for k in "${UNIQUE_PATH_KEYS[@]+"${UNIQUE_PATH_KEYS[@]}"}"; do
+    RAW_SAMPLES+=("$k")
 done
-for c in "${CONTROLS[@]}"; do
-    RAW_SAMPLES+=("$c")
-done
-# Remove duplicates
+# Keep sorted for deterministic Snakefile output
 RAW_SAMPLES=($(printf '%s\n' "${RAW_SAMPLES[@]}" | sort -u))
 
 # ============================================================================
@@ -329,6 +375,13 @@ EOF
     echo ""
     echo "# All raw samples (treatment and control)"
     echo "RAW_SAMPLES = $(python_list "${RAW_SAMPLES[@]}")"
+    echo ""
+    echo "# Mapping from raw_sample name to input file or directory path"
+    echo "RAW_PATHS = {"
+    for i in "${!UNIQUE_PATH_KEYS[@]}"; do
+        echo "    \"${UNIQUE_PATH_KEYS[$i]}\": \"${UNIQUE_PATH_VALS[$i]}\","
+    done
+    echo "}"
     echo ""
     echo "# Sample names (from relationships)"
     echo "SAMPLES = $(python_list "${SAMPLES[@]}")"
@@ -682,4 +735,7 @@ else
 fi
 echo ""
 echo "Dorado model (for pod5 inputs): $DORADO_MODEL"
-echo "  (pod5 input detected at runtime via raw_data/{sample}/ directory)"
+echo "Raw input paths:"
+for i in "${!UNIQUE_PATH_KEYS[@]}"; do
+    echo "  ${UNIQUE_PATH_KEYS[$i]}: ${UNIQUE_PATH_VALS[$i]}"
+done

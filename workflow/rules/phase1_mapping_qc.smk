@@ -6,23 +6,26 @@ import glob as pyglob
 
 
 def find_raw_reads(wildcards):
-    """Find raw read file: .fastq.gz/.fastq/.bam, or data/basecalled/ for pod5 input."""
+    """Return the raw read file for a sample, using the path from RAW_PATHS.
+
+    For pod5 input: dorado_basecall (phase 0) produces data/basecalled/{sample}.bam,
+    which is returned here so map_reads depends on it and triggers basecalling.
+    For all other input types (fastq.gz, fastq, bam): the path is used directly.
+    """
     raw_sample = wildcards.raw_sample
-    base_path = f"raw_data/{raw_sample}"
 
-    # Check for each supported extension in order of preference
-    for ext in [".fastq.gz", ".fastq", ".bam"]:
-        if os.path.exists(base_path + ext):
-            return base_path + ext
-
-    # Pod5 directory: basecalling handled by dorado_basecall rule (phase 0)
+    # Pod5 input: basecalling handled by dorado_basecall rule (phase 0)
     if has_pod5(raw_sample):
         return f"data/basecalled/{raw_sample}.bam"
 
+    path = RAW_PATHS.get(raw_sample)
+    if path and os.path.exists(path):
+        return path
+
     raise FileNotFoundError(
-        f"No raw reads found for {raw_sample}. "
-        f"Expected one of: {base_path}.fastq.gz, {base_path}.fastq, {base_path}.bam, "
-        f"or a pod5 directory at {base_path}/"
+        f"No raw reads found for '{raw_sample}'. "
+        f"Configured path: {path!r}. "
+        f"Check the ^r line in CONFIG and ensure the file exists."
     )
 
 

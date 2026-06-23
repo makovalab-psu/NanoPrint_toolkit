@@ -9,17 +9,22 @@ import os
 
 
 def get_pod5_dir(raw_sample):
-    """Return the pod5 source path for a sample, or None if not pod5 input."""
-    # Directory of pod5 files: raw_data/{sample}/
-    pod5_dir = f"raw_data/{raw_sample}"
-    if os.path.isdir(pod5_dir) and any(
-        f.endswith(".pod5") for f in os.listdir(pod5_dir)
-    ):
-        return pod5_dir
-    # Single pod5 file: raw_data/{sample}.pod5
-    pod5_file = f"raw_data/{raw_sample}.pod5"
-    if os.path.exists(pod5_file):
-        return pod5_file
+    """Return the pod5 source path for a sample, or None if not pod5 input.
+
+    The path comes from RAW_PATHS (set by CONFIG.sh from the ^r line).
+    A single .pod5 file is returned as-is.
+    A directory is returned as-is if any .pod5 file exists anywhere under it
+    (os.walk recurses into subdirectories so nested sequencer output trees work).
+    """
+    path = RAW_PATHS.get(raw_sample)
+    if path is None:
+        return None
+    if os.path.isfile(path) and path.endswith(".pod5"):
+        return path
+    if os.path.isdir(path):
+        for _root, _dirs, files in os.walk(path):
+            if any(f.endswith(".pod5") for f in files):
+                return path  # top-level dir; dorado/uncalled4 recurse internally
     return None
 
 

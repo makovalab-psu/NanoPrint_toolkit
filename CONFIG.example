@@ -17,8 +17,15 @@
 ^s	2
 
 #Relationships between files
-#^    Sample          Treatment                 Control
-^r	Hsap_HG002_LCL	Hsap_HG002_LCL_Mn04.bam	Hsap_HG002_LCL_CTRL.bam
+# Treatment and control fields are absolute (or relative) paths to the input file or directory.
+# For FASTQ/BAM: provide the path to the file.
+# For pod5: provide the path to the pod5 directory (searched recursively for .pod5 files).
+# The raw_sample name is derived from the path basename minus extension.
+#^    Sample          Treatment                                        Control
+^r	Hsap_HG002_LCL	/path/to/reads/Hsap_HG002_LCL_Mn04.bam	/path/to/reads/Hsap_HG002_LCL_CTRL.bam
+
+# Pod5 example:
+#^r	Hsap_HG002_LCL	/sequencer/output/run_Mn04/pod5_pass	/sequencer/output/run_CTRL/pod5_pass
 
 # Temporary intermediate files (deleted after downstream rules complete)
 # Remove these lines to keep all intermediate files

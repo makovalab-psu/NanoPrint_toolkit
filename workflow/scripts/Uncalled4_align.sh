@@ -4,17 +4,18 @@
 # Takes a sequence-aligned BAM (filtered_alignments) and the original pod5 files.
 # Produces a BAM with signal-level DTW alignment data.
 #
-# Usage: Uncalled4_align.sh -i <filtered.bam> -p <pod5_dir> -g <genome.fa> -o <out.bam> [-t <threads>]
+# Usage: Uncalled4_align.sh -i <filtered.bam> -p <pod5_path> -g <genome.fa> -o <out.bam> [-t <threads>]
 #
-# Command syntax confirmed from js4004 Snakefile:
-#   uncalled4 align --bam-in <bam> --ref <fa> --reads <pod5> -o <out.bam>
+# Pod5 path may be a single .pod5 file or a directory. Directories are passed
+# directly to uncalled4 --reads; the pod5 C++ library (>= 0.3.x) searches recursively.
+# Command syntax: uncalled4 align --bam-in <bam> --ref <fa> --reads <pod5> -o <out.bam> -p <n>
 # Parallelism via -p (official docs: default is 1 process).
 
 set -euo pipefail
 
 usage() {
     cat << EOF
-Usage: $(basename "$0") -i <filtered.bam> -p <pod5_dir> -g <genome.fa> -o <out.bam> [-t <threads>]
+Usage: $(basename "$0") -i <filtered.bam> -p <pod5_path> -g <genome.fa> -o <out.bam> [-t <threads>]
 
 Align raw nanopore signals to the pore model reference using Uncalled4 (BAM output).
 Input BAM must have sequence-level alignments (from minimap2) and a move table
@@ -23,7 +24,7 @@ the raw pod5 data.
 
 Required arguments:
     -i    Input sequence-aligned BAM (filtered_alignments/{genome}/{sample}.bam)
-    -p    Pod5 file directory (raw_data/{sample}/) or single pod5 file
+    -p    Absolute path to pod5 directory or single pod5 file
     -g    Reference genome FASTA
     -o    Output Uncalled4 BAM with DTW signal alignment
 
@@ -34,7 +35,7 @@ Optional arguments:
 Example:
     $(basename "$0") \\
         -i data/filtered_alignments/genome/Sample01.bam \\
-        -p raw_data/Sample01/ \\
+        -p /absolute/path/to/pod5/run01/ \\
         -g resources/genomes/genome.fa \\
         -o data/uncalled4/genome/Sample01.bam \\
         -t 8
