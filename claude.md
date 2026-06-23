@@ -947,9 +947,9 @@ signal alignment — use this to avoid running the expensive align step twice.
   per official uncalled4 docs (predicted minus actual; positive = observed lower than expected).
   This is the signal deviation used in phase 2b. Sign is consistent across treatment/control
   so the reactivity calculation (treatment − control) is unaffected.
-- `dtw.base`: binarized reference base — may be a letter (A/C/G/T) or integer (0=A,1=C,2=G,3=T).
-  `perbase_signal_deviation.py` uses this for nucleotide identity; falls back to pysam FASTA
-  lookup only if `dtw.base` is absent.
+- `dtw.base`: **NOT a valid uncalled4 layer** — causes `ValueError: Invalid layer "dtw.base"` in
+  current uncalled4 versions (js4016, 2026-06-23). Do NOT include in `--tsv-cols`.
+  `perbase_signal_deviation.py` falls back to pysam FASTA lookup for nucleotide identity.
 - Column names for chromosome/position vary by uncalled4 version: `ref`/`seq_name`/`chr`
   and `pos`/`seq_pos`/`ref_pos` — `perbase_signal_deviation.py` handles all variants.
 - `-p` (processes) defaults to **1** in uncalled4 — always pass `-t {threads}` from Snakemake.
@@ -1017,6 +1017,24 @@ targets (G4 oligos ~86–89 bp), ALL reads fail the default threshold, producing
 `Counter({'Alignment too short': N})` and an empty BAM. Fix: add `--min-aln-length 50`.
 This is safe for WGS too (long reads produce alignments >> 50 bp). First seen in js4004
 (confirmed in js4004/Snakefile lines 153, 176); re-hit in js4016 with G4 oligo genomes.
+
+**Uncalled4 — output BAM is unsorted; must `samtools sort` before `samtools index` (js4016, 2026-06-23):**
+`uncalled4 align` writes reads in signal-processing order, not genomic coordinate order. Passing
+the raw output directly to `samtools index` fails with:
+```
+[E::hts_idx_push] Chromosome blocks not continuous
+[E::sam_index] Read '...' cannot be indexed
+```
+Fix in `Uncalled4_align.sh`: run `samtools sort` into a temp file before indexing, then replace
+the original output:
+```bash
+samtools sort -@ "$THREADS" -T "${TMP_DIR}/sort_tmp2" -o "$SORTED_TMP" "$OUTPUT"
+mv "$SORTED_TMP" "$OUTPUT"
+samtools index "$OUTPUT"
+```
+The read count check (`samtools view -c`) must run BEFORE sorting (on the raw uncalled4 output)
+since sorting doesn't change read count but the temp mv would clobber the original.
+Note: this sorting step is already handled inside `Uncalled4_align.sh` — no Snakemake rule change needed.
 
 **Uncalled4 known issues (from js4007):**
 - **Non-zero exit on partial failure:** `uncalled4 align` returns non-zero when any reads fail

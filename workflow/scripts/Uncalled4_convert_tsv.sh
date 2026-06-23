@@ -34,7 +34,9 @@ TSV columns extracted from the BAM:
     dtw.start         Signal sample start index in raw trace
     dtw.length        Number of signal samples spanning this position
     dtw.model_diff    Model current - observed current (pA); positive = observed < expected
-    dtw.base          Binarized reference base (letter or integer-encoded)
+Note: dtw.base is NOT requested — it is not a valid layer in current uncalled4 versions
+and causes "Invalid layer" ValueError. perbase_signal_deviation.py falls back to pysam
+FASTA lookup for nucleotide identity when dtw.base is absent.
 
 Example:
     $(basename "$0") \\
@@ -126,7 +128,7 @@ uncalled4 convert \
     --bam-in  "$TMP_BAM" \
     -p        "$THREADS" \
     --tsv-out "$OUTPUT_TSV" \
-    --tsv-cols "dtw.current,dtw.current_sd,dtw.start,dtw.length,dtw.model_diff,dtw.base" || true
+    --tsv-cols "dtw.current,dtw.current_sd,dtw.start,dtw.length,dtw.model_diff" || true
 
 if [[ ! -f "$OUTPUT_TSV" ]]; then
     echo "Error: uncalled4 convert produced no TSV output" >&2
