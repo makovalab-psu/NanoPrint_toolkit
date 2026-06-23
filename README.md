@@ -23,12 +23,25 @@ The pipeline auto-detects the input format at runtime — no CONFIG flag require
 Standard FASTQ (gzipped), unaligned BAM, or raw Oxford Nanopore pod5 files.
 
 ### Location
+
+Paths are specified directly in the `^r` line of the CONFIG file — no fixed directory layout is required:
+
 ```
-raw_data/{sample}.fastq.gz     # gzipped FASTQ
-raw_data/{sample}.bam          # unaligned BAM (e.g., Dorado output)
-raw_data/{sample}/             # directory of .pod5 files  →  pod5 mode
-raw_data/{sample}.pod5         # single pod5 file           →  pod5 mode
+# In CONFIG (^r  Sample  Treatment  Control):
+^r  MySample  /absolute/path/to/treatment.bam   /absolute/path/to/control.bam
+^r  MySample  /sequencer/run01/pod5_pass        /sequencer/run02/pod5_pass
 ```
+
+Supported input formats and how to specify them:
+
+| Format | Path to provide | Mode |
+|--------|----------------|------|
+| Gzipped FASTQ | `/path/to/{sample}.fastq.gz` | Standard error track |
+| Unaligned BAM | `/path/to/{sample}.bam` | Standard error track |
+| Pod5 directory | `/path/to/pod5/run/` (searched recursively) | Pod5 mode — adds signal track |
+| Single pod5 file | `/path/to/{sample}.pod5` | Pod5 mode — adds signal track |
+
+The raw_sample name used throughout the pipeline is derived from the path basename minus extension (e.g., `/runs/Sample01.bam` → `Sample01`). If two paths from different `^r` lines would produce the same name, CONFIG.sh exits with an error listing the conflicting paths.
 
 ---
 
@@ -560,9 +573,10 @@ python -c "import pod5; print(pod5.__version__)"
 Make directories for inputs
 
 ```bash
-mkdir -p resources/genomes resources/features raw_data
+mkdir -p resources/genomes resources/features
 ```
-Then add the relevant files in to the correct directory.
+
+Place reference genomes in `resources/genomes/` and feature BED files in `resources/features/`. Raw sequencing reads can be located anywhere on the filesystem — paths are specified directly in the CONFIG `^r` line.
 
 ## 2. Edit CONFIG file
 
@@ -588,8 +602,15 @@ Your CONFIG file should look something like this:
 ^s	2
 
 #Relationships between files
-#^    Sample          Treatment                 Control
-^r	Hsap_HG002_LCL	Hsap_HG002_LCL_Mn04.bam	Hsap_HG002_LCL_CTRL.bam
+# Treatment and control fields are absolute (or relative) paths to the input file or directory.
+# For FASTQ/BAM: provide the path to the file.
+# For pod5: provide the path to the pod5 directory (searched recursively for .pod5 files).
+# The raw_sample name is derived from the path basename minus extension.
+#^    Sample          Treatment                                        Control
+^r	Hsap_HG002_LCL	/path/to/reads/Hsap_HG002_LCL_Mn04.bam	/path/to/reads/Hsap_HG002_LCL_CTRL.bam
+
+# Pod5 example:
+#^r	Hsap_HG002_LCL	/sequencer/output/run_Mn04/pod5_pass	/sequencer/output/run_CTRL/pod5_pass
 
 # Temporary intermediate files (deleted after downstream rules complete)
 # Remove these lines to keep all intermediate files
@@ -615,7 +636,7 @@ The wildcard variables are assigned designated as:
 ^a Window size for mean reactivity bedGraph/bigWig files
 ^w The window files you want in the windows bed files
 ^s The significance threshold for identifying reactive nucleotides (0 = all data, no threshold; 1–4 = p-value cutoffs; multiple lines allowed; level 0 does not produce density files)
-^r The relationship between sequencing reads
+^r The relationship between sequencing reads. Treatment and control fields are absolute (or relative) paths to the input file or directory. The raw_sample name is derived from the path basename minus extension.
 ^t Directories containing temporary files (auto-deleted after use)
 ^igv-bam Generate strand-split BAMs and indices for IGV visualization (flag, no value)
 ^igv-bigwig Generate coverage bigWig files for each strand-split BAM (flag, no value)
@@ -688,7 +709,7 @@ free `open` partition, while a paid allocation ID routes to `sla-prio` with `--a
  └──────────────────────────────────────────────────────────────────────┘
 
               ┌─────────────────────────────────────────────┐
-              │       Raw pod5 files (raw_data/{sample}/)   │
+              │  Raw pod5 files (path specified in ^r line) │
               └─────────────────────────────────────────────┘
                                      │
                                      ▼
@@ -731,8 +752,8 @@ free `open` partition, while a paid allocation ID routes to `sla-prio` with `--a
  │           PHASE 1: MAPPING & QC             │
  └─────────────────────────────────────────────┘
               ┌─────────────────────────────────────────────┐
-              │   Raw reads (fastq, unaligned bam, or       │
-              │   data/basecalled/{sample}.bam from phase 0)│
+              │   Raw reads (path from ^r line: fastq, bam, │
+              │   or data/basecalled/{sample}.bam if pod5)  │
               └─────────────────────────────────────────────┘
                                      │
                     ┌────────────────┼───────────────────┐
@@ -970,7 +991,7 @@ free `open` partition, while a paid allocation ID routes to `sla-prio` with `--a
 **Script:** `workflow/scripts/Dorado_basecall.sh`
 
 **Inputs:**
-- `raw_data/{sample}/` (pod5 directory) or `raw_data/{sample}.pod5`
+- Pod5 directory or single pod5 file (absolute path from `^r` CONFIG line)
 
 **Outputs:**
 - `data/basecalled/{sample}.bam` (unsorted, unaligned; sorted/aligned in subsequent map_reads step)
@@ -1001,7 +1022,7 @@ Notes:
     - Output BAM is unsorted; the pipeline sorts it after alignment in map_reads
 
 Example:
-    Dorado_basecall.sh -i raw_data/Sample01/ -o data/basecalled/Sample01.bam -m sup -t 4
+    Dorado_basecall.sh -i /absolute/path/to/pod5/Sample01/ -o data/basecalled/Sample01.bam -m sup -t 4
 ```
 
 ---
@@ -1014,7 +1035,7 @@ Example:
 
 **Inputs:**
 - `data/filtered_alignments/{genome}/{sample}.bam` (sequence-level alignments from map_reads)
-- `raw_data/{sample}/` (pod5 files for raw signal)
+- Pod5 directory or file (absolute path from `^r` CONFIG line; searched recursively)
 - `resources/genomes/{genome}.fa`
 
 **Outputs:**
@@ -1056,7 +1077,7 @@ Notes:
 
 Example:
     Uncalled4_align.sh -i data/filtered_alignments/genome/Sample01.bam \
-        -p raw_data/Sample01/ -g resources/genomes/genome.fa \
+        -p /absolute/path/to/pod5/run01/ -g resources/genomes/genome.fa \
         -o data/uncalled4/genome/Sample01.bam -t 8
 ```
 
@@ -1119,7 +1140,7 @@ Example:
 **Script:** `workflow/scripts/Read_stats.sh`
 
 **Inputs:**
-- `raw_data/{sample}.fastq.gz`
+- Raw reads file (path from `^r` CONFIG line: `.fastq.gz` or `.bam`)
 
 **Outputs:**
 - `tables/read_stats/{sample}.txt`
@@ -1169,7 +1190,7 @@ Example:
 **Script:** `workflow/scripts/Map_reads.sh`
 
 **Inputs:**
-- `raw_data/{sample}.fastq.gz`
+- Raw reads file (path from `^r` CONFIG line: `.fastq.gz`, `.bam`, or `data/basecalled/{sample}.bam` for pod5)
 - `resources/genomes/{genome}.fa`
 
 **Outputs:**
@@ -2552,11 +2573,11 @@ rule split_perbase_by_chr_chicken_v23:
 
 ### How Pod5 Mode Is Triggered
 
-The pipeline detects pod5 input automatically at Snakemake run time via the `has_pod5()` function (defined in `workflow/rules/phase0_pod5_processing.smk`):
+The pipeline detects pod5 input automatically at Snakemake run time via the `has_pod5()` function (defined in `workflow/rules/phase0_pod5_processing.smk`). The path for each raw sample comes from the `RAW_PATHS` dict generated by CONFIG.sh from the `^r` line:
 
-1. Checks for `raw_data/{sample}/` directory containing `.pod5` files
-2. Checks for `raw_data/{sample}.pod5` single file
-3. If either exists → pod5 mode; otherwise → standard FASTQ/BAM mode
+1. If the path ends in `.pod5` and is a file → pod5 mode
+2. If the path is a directory and any `.pod5` file exists anywhere under it (`os.walk`, recursive) → pod5 mode
+3. Otherwise → standard FASTQ/BAM mode
 
 No CONFIG flag is needed. The `find_raw_reads()` function in phase 1 returns `data/basecalled/{sample}.bam` when pod5 is detected, causing Snakemake to add `dorado_basecall` as an upstream dependency automatically.
 
