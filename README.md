@@ -554,9 +554,11 @@ pip install setuptools==69.5.1
 
 pip install uncalled4
 
-# CRITICAL: pin pod5 and pyarrow versions
-# lib-pod5 >=0.3.33 + pyarrow >=20 deadlocks inside uncalled4's C extension
-pip install "pod5==0.3.10" "lib-pod5==0.3.10" "pyarrow>=14,<15"
+# CRITICAL: pin pyarrow
+# lib-pod5 >=0.3.33 + pyarrow >=20 deadlocks inside uncalled4's C extension.
+# lib-pod5==0.3.10 does not exist on PyPI; the latest available version is fine.
+# Pinning pyarrow<20 is sufficient to prevent the deadlock.
+pip install "pod5" "pyarrow>=14,<20"
 ```
 
 Verify the installation:
@@ -663,6 +665,14 @@ snakemake --dag | dot -Tpdf > dag.pdf
 ```bash
 snakemake --cores 4
 ```
+
+When using pod5 input, add `--resources gpu=1` to prevent multiple Dorado jobs from running simultaneously and competing for GPU memory:
+
+```bash
+snakemake --cores 8 --resources gpu=1
+```
+
+This serializes `dorado_basecall` jobs (one at a time) while allowing all other rules to run in parallel. Each job uses all available GPUs; running two jobs concurrently causes CUDA out-of-memory errors.
 
 ### SLURM cluster execution (Penn State Roar)
 
@@ -1020,6 +1030,8 @@ Optional arguments:
 Notes:
     - GPU is used automatically if available; set CUDA_VISIBLE_DEVICES to control
     - Output BAM is unsorted; the pipeline sorts it after alignment in map_reads
+    - --recursive is added automatically when the input is a directory, so pod5
+      files nested in sequencer output subdirectories (e.g. pod5_pass/) are found
 
 Example:
     Dorado_basecall.sh -i /absolute/path/to/pod5/Sample01/ -o data/basecalled/Sample01.bam -m sup -t 4
@@ -2614,7 +2626,7 @@ Because the per-base signal deviation files share the 5-column format with per-b
 | Non-zero exit on partial DTW failure | Script aborts even though most reads succeeded | `|| true` in scripts + non-empty output check |
 | `*` sentinel for DTW failures | TSV column has `*` instead of a number | `na_values=["*"]` in `pd.read_csv` |
 | Missing newlines between TSV rows | Row with too many fields | `on_bad_lines="warn"` in `pd.read_csv` |
-| pod5/pyarrow deadlock | Hangs indefinitely inside C extension | Pin `pod5==0.3.10`, `pyarrow>=14,<15` |
+| pod5/pyarrow deadlock | Hangs indefinitely inside C extension | Pin `pyarrow>=14,<20` (`lib-pod5==0.3.10` does not exist on PyPI; any recent pod5 version is fine) |
 | setuptools incompatibility | `pip install uncalled4` build fails | `pip install setuptools==69.5.1` first |
 | `-p` processes defaults to 1 | Single-threaded despite Snakemake allocating 8 threads | Always pass `-p "$THREADS"` explicitly |
 

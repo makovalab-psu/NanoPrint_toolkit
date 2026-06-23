@@ -46,6 +46,8 @@ rule dorado_basecall:
     benchmark:
         "benchmarks/phase0/dorado_basecall/{raw_sample}.tsv"
     threads: 4
+    resources:
+        gpu=1
     shell:
         """
         workflow/scripts/Dorado_basecall.sh \
