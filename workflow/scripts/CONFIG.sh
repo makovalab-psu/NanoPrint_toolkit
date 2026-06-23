@@ -54,6 +54,7 @@ declare -a CONTROLS=()
 declare -a TEMP_DIRS=()
 IGV_BAM="false"
 IGV_BIGWIG="false"
+DORADO_MODEL="sup"
 
 # Function to strip file extension
 strip_ext() {
@@ -146,6 +147,9 @@ while IFS= read -r line || [[ -n "$line" ]]; do
                 ;;
             "^igv-bigwig")
                 IGV_BIGWIG="true"
+                ;;
+            "^dorado-model")
+                DORADO_MODEL="$(echo "$values" | cut -f1 | tr -d ' ')"
                 ;;
         esac
     fi
@@ -374,7 +378,14 @@ EOF
     echo "    \"annotations\": \"data/annotations\" in TEMP_DIRS,"
     echo "    \"annotations_merged\": \"data/annotations_merged\" in TEMP_DIRS,"
     echo "    \"bg_mean\": \"data/bg_mean\" in TEMP_DIRS,"
+    echo "    \"signal_reactivity\": \"data/signal_reactivity\" in TEMP_DIRS,"
+    echo "    \"signal_bg\": \"data/signal_bg\" in TEMP_DIRS,"
+    echo "    \"signal_bw\": \"data/signal_bw\" in TEMP_DIRS,"
+    echo "    \"signal_bg_mean\": \"data/signal_bg_mean\" in TEMP_DIRS,"
     echo "}"
+    echo ""
+    echo "# Dorado basecalling model (used when pod5 input is detected)"
+    echo "DORADO_MODEL = \"${DORADO_MODEL}\""
     echo ""
     echo "# IGV export settings"
     if [[ "$IGV_BAM" == "true" ]]; then
@@ -421,10 +432,14 @@ def wrap_output(key, path):
 # Include rule files
 # ============================================================================
 
+include: "workflow/rules/phase0_pod5_processing.smk"
 include: "workflow/rules/phase1_mapping_qc.smk"
 include: "workflow/rules/phase2_perbase_error.smk"
+include: "workflow/rules/phase2b_signal_deviation.smk"
 include: "workflow/rules/phase3_reactivity.smk"
+include: "workflow/rules/phase3b_signal_reactivity.smk"
 include: "workflow/rules/phase4_analysis.smk"
+include: "workflow/rules/phase4b_signal_analysis.smk"
 include: "workflow/rules/phase5_annotate_features.smk"
 include: "workflow/rules/phase6_igv.smk"
 include: "workflow/rules/phase7_summary_tables_plots.smk"
@@ -507,6 +522,29 @@ rule all:
                genome=GENOMES, feature=FEATURES, sample=SAMPLES)
         if FEATURES else [],
 
+        # Phase 2b: Per-base signal deviation (only for samples with pod5 input)
+        [f"data/perbase_signal/{genome}/{rs}_{strand}.txt.gz"
+         for genome in GENOMES
+         for rs in RAW_SAMPLES
+         for strand in STRANDS
+         if has_pod5(rs)],
+
+        # Phase 3b: Signal reactivity bigWig files (only for samples with pod5 input)
+        [f"data/signal_bw_merged/{genome}/significance_threshold_{sig}/{sample}_{strand}.bw"
+         for genome in GENOMES
+         for sig in SIG_LEVELS
+         for sample in SAMPLES
+         for strand in STRANDS
+         if has_pod5(get_treatment(sample)) and has_pod5(get_control(sample))],
+
+        # Phase 4b: Mean signal reactivity bigWig (only when pod5 + mean windows configured)
+        [f"data/signal_bw_mean_merged/{genome}/window_size_{mean_size}/{sample}_{strand}.bw"
+         for genome in GENOMES
+         for mean_size in MEAN_WINDOW_SIZES
+         for sample in SAMPLES
+         for strand in STRANDS
+         if MEAN_WINDOW_SIZES and has_pod5(get_treatment(sample)) and has_pod5(get_control(sample))],
+
 EOF
 
 # ============================================================================
@@ -522,7 +560,7 @@ cat > "$GENOME_RULES_FILE" << 'EOF'
 
 EOF
 
-# Generate a split_perbase_by_chr rule for each genome
+# Generate split_perbase_by_chr and split_signal_by_chr rules for each genome
 for i in "${!GENOME_CHR_NAMES[@]}"; do
     genome="${GENOME_CHR_NAMES[$i]}"
     chrs_array=(${GENOME_CHR_VALUES[$i]})
@@ -549,6 +587,41 @@ rule split_perbase_by_chr_${genome//./_}:
         """
         python3 workflow/scripts/Split_by_chr.sh \\
             -i {input.error} \\
+            -d {params.outdir} \\
+            2>&1 | tee {log}
+
+        # Create empty gzipped files for any expected chromosomes with no data
+        for f in {output}; do
+            if [[ ! -f "\$f" ]]; then
+                echo "No data for \$f — creating empty file" | tee -a {log}
+                echo -n | gzip > "\$f"
+            fi
+        done
+
+        echo "Successfully created chromosome files:" | tee -a {log}
+        ls -la {params.outdir}/*.txt.gz | tee -a {log}
+        """
+
+
+rule split_signal_by_chr_${genome//./_}:
+    """Split per-base signal deviation file by chromosome for ${genome}."""
+    input:
+        dev="data/perbase_signal/${genome}/{raw_sample}_{strand}.txt.gz"
+    output:
+        expand("data/perbase_signal_by_chr/${genome}/{{raw_sample}}_{{strand}}/{{raw_sample}}_{{strand}}_{chr}.txt.gz",
+               chr=${chrs_python})
+    params:
+        outdir="data/perbase_signal_by_chr/${genome}/{raw_sample}_{strand}"
+    log:
+        "logs/split_signal_by_chr/${genome}/{raw_sample}_{strand}.log"
+    benchmark:
+        "benchmarks/phase2b/split_signal_by_chr/${genome}/{raw_sample}_{strand}.tsv"
+    wildcard_constraints:
+        strand="for|rev"
+    shell:
+        """
+        python3 workflow/scripts/Split_by_chr.sh \\
+            -i {input.dev} \\
             -d {params.outdir} \\
             2>&1 | tee {log}
 
@@ -607,3 +680,6 @@ if [[ ${#TEMP_DIRS[@]} -gt 0 ]]; then
 else
     echo "  (none)"
 fi
+echo ""
+echo "Dorado model (for pod5 inputs): $DORADO_MODEL"
+echo "  (pod5 input detected at runtime via raw_data/{sample}/ directory)"

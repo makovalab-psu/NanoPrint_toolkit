@@ -23,6 +23,21 @@ dependencies:
 
   # Python
   - python>=3.8
+  - pysam
+  - numpy
+  - pandas
+
+  # Pore model signal alignment (pod5 mode)
+  # dorado: download binary from https://github.com/nanoporetech/dorado/releases
+  #   (GPU basecaller; not on conda)
+  #
+  # After conda env create, install uncalled4 and pinned pod5 via pip:
+  #   pip install setuptools==69.5.1        # required — newer setuptools breaks uncalled4 build
+  #   pip install uncalled4
+  #   pip install "pod5==0.3.10" "lib-pod5==0.3.10" "pyarrow>=14,<15"
+  #
+  # CRITICAL: lib-pod5 >=0.3.33 + pyarrow >=20 deadlocks during uncalled4 signal reading
+  # (js4007, 2026-03-25). Pin pod5==0.3.10 + pyarrow<15 to avoid indefinite hang.
 
   # R and packages
   - r-base

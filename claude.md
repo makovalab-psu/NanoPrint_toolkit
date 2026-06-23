@@ -82,26 +82,51 @@ Phases 3-5: Combine using {sample} from relationship
 
 ## Input File Flexibility
 
-Phase 1 rules use `find_raw_reads()` helper function that automatically detects input format:
-- Checks for `.fastq.gz`, `.fastq`, `.bam` in order
-- No need to specify extension in CONFIG
+Phase 0/1 rules use `find_raw_reads()` and `has_pod5()` to detect input format:
+- Checks for `.fastq.gz`, `.fastq`, `.bam` in order (existing behavior)
+- If `raw_data/{sample}/` is a directory containing `.pod5` files → pod5 mode
+- Pod5 mode triggers Phase 0 (Dorado basecalling + Uncalled4 alignment) automatically
+- No need to specify input type in CONFIG; detected from filesystem
 
 ## Pipeline Phases
+
+### Phase 0: Pod5 Raw Data Processing (new, Jun 2026)
+- Only active when `raw_data/{sample}/` contains pod5 files
+- `dorado_basecall`: pod5 → `data/basecalled/{sample}.bam` (with `--emit-moves` for move tables)
+- `uncalled4_align`: filtered BAM + pod5 → `data/uncalled4/{genome}/{sample}.bam` (BAM, all strands)
+- `uncalled4_convert_tsv`: uncalled4 BAM → `data/uncalled4_tsv/{genome}/{sample}_{strand}.tsv`
+  (strand pre-filtered with samtools, then `uncalled4 convert` extracts DTW columns; no re-alignment)
+- The Uncalled4 BAM is the primary input for per-base error when pod5 is present
 
 ### Phase 1: Mapping & QC (Steps 1-5)
 - Calculate read statistics (N50, Q50, total bases)
 - Map reads to reference genome with minimap2
+- When pod5 input: `find_raw_reads()` returns `data/basecalled/{sample}.bam` to trigger dorado
 - Filter alignments (MAPQ >= 20, remove secondary/supplementary)
 - Generate alignment statistics and histograms
 
 ### Phase 2: Per-base Error (Steps 6-8)
-- Calculate per-base error rates from filtered alignments (strand-specific)
-- Split files by chromosome (checkpoint for parallelization)
+- Calculate per-base error rates (strand-specific)
+- Input: `data/uncalled4/{genome}/{sample}.bam` when pod5 available; filtered BAM otherwise
+- Split files by chromosome (for parallelization)
 - Correlate per-base error between samples via random subsampling
+
+### Phase 2b: Per-base Signal Deviation (new, Jun 2026)
+- Only active when pod5 input is available (Uncalled4 TSV exists)
+- `perbase_signal_deviation`: parses `dtw.model_diff` from the Uncalled4 TSV, groups by (chr, pos),
+  computes mean deviation per position, looks up nucleotide from reference FASTA
+- Input TSV is strand-specific (pre-filtered before Uncalled4 ran in `uncalled4_convert_tsv`)
+- Output: `data/perbase_signal/{genome}/{sample}_{strand}.txt.gz` (same 5-col format as perbase_error)
+- Split by chromosome: `data/perbase_signal_by_chr/` (via `split_signal_by_chr_{genome}` rules)
 
 ### Phase 3: Reactivity (Step 9)
 - Calculate reactivity: treatment_error - control_error
 - Operates per-chromosome for parallel processing
+
+### Phase 3b: Signal Reactivity (new, Jun 2026)
+- Calculate signal reactivity: treatment_deviation - control_deviation
+- Reuses `Calculate_reactivity.sh` (same 5-col input format)
+- Output: `data/signal_reactivity/{genome}/{sample}_{strand}_{chr}.txt.gz`
 
 ### Phase 4: Output Formats (Steps 10-14)
 - Convert reactivity to bedGraph format with significance thresholds
@@ -109,6 +134,11 @@ Phase 1 rules use `find_raw_reads()` helper function that automatically detects 
 - Calculate mean reactivity in genomic windows (from `^a` sizes)
 - Convert bedGraph to bigWig format
 - Merge chromosome-split files back together
+
+### Phase 4b: Signal Output Formats (new, Jun 2026)
+- Same structure as Phase 4 but for signal reactivity data
+- Output paths: `data/signal_bg/`, `data/signal_bw_merged/`, `data/signal_bw_mean_merged/`
+- Reuses `react_to_bg.sh`, `bg_to_bw.sh`, `Merge_bigwig.sh`, `react_mean_bg.sh`
 
 ### Phase 5: Feature Annotation (Steps 15-18)
 - Split feature BED files by chromosome
@@ -862,3 +892,97 @@ Phase 7 aggregates pipeline outputs into human-readable CSV tables and publicati
    For-strand and rev-strand data are pooled per sample pair before computing Spearman and Pearson correlations.
 
 5. **`plot_annotation` strand handling**: The annotation data's internal `Strand` column (BED feature strand: `+`/`-`) is averaged away via `group_by(Distance, Sample, Genome_strand) %>% summarise(...)`. Only `Genome_strand` (forward/reverse, derived from the filename) determines the line type in the 3-panel plot (solid = forward, dotted = reverse). Colors: Treatment = black, Control = grey50.
+
+### Pod5 / Uncalled4 Signal Analysis (Jun 2026)
+
+Pod5 input mode was added in js4016. The pipeline detects pod5 automatically at runtime — no CONFIG flag required. The full signal analysis chain:
+
+```
+raw_data/{sample}/          (pod5 files)
+    ↓ dorado_basecall (phase 0)
+data/basecalled/{sample}.bam
+    ↓ map_reads + filter_alignments (phase 1, existing)
+data/filtered_alignments/{genome}/{sample}.bam
+    ├─→ perbase_error (phase 2)            ← standard error track (unchanged)
+    └─→ uncalled4_align (phase 0)
+data/uncalled4/{genome}/{sample}.bam       ← compact BAM with all DTW tags
+    ├─→ perbase_error (phase 2)            ← replaces filtered BAM as input when pod5 present
+    └─→ uncalled4_convert_tsv (phase 0)    ← fast format conversion, no re-alignment
+data/uncalled4_tsv/{genome}/{sample}_{strand}.tsv
+    └─→ perbase_signal_deviation (phase 2b) ← mean dtw.model_diff per position
+         ↓ split_signal_by_chr (genome_specific_rules.smk)
+data/perbase_signal_by_chr/{genome}/{sample}_{strand}/{chr}.txt.gz
+    ↓ calculate_signal_reactivity (phase 3b)
+data/signal_reactivity/{genome}/{sample}_{strand}_{chr}.txt.gz
+    ↓ signal_reactivity_to_bedgraph → signal_bedgraph_to_bigwig → merge_signal_bigwig (phase 4b)
+data/signal_bw_merged/{genome}/significance_threshold_{sig}/{sample}_{strand}.bw
+```
+
+**Uncalled4 command syntax** (confirmed from js4004/Snakefile + official docs):
+```bash
+# Step 1 — signal alignment (slow; run once per sample):
+uncalled4 align --bam-in <filtered.bam> --ref <fa> --reads <pod5> -p <threads> -o <out.bam>
+
+# Step 2 — TSV extraction (fast format conversion; run once per strand):
+#   pre-filter to one strand first: samtools view -b -h [-F 0x10 | -f 0x10] uncalled4.bam > strand.bam
+uncalled4 convert --bam-in <strand.bam> -p <threads> \
+    --tsv-out <out.tsv> \
+    --tsv-cols "dtw.current,dtw.current_sd,dtw.start,dtw.length,dtw.model_diff,dtw.base"
+```
+
+`uncalled4 align` BAM and TSV outputs are mutually exclusive (one per invocation).
+`uncalled4 convert` reads an existing uncalled4 BAM and writes TSV without re-running
+signal alignment — use this to avoid running the expensive align step twice.
+
+**Uncalled4 TSV key column:**
+- `dtw.model_diff` (renamed to `dtw_model_diff` after loading): **model − observed** current (pA)
+  per official uncalled4 docs (predicted minus actual; positive = observed lower than expected).
+  This is the signal deviation used in phase 2b. Sign is consistent across treatment/control
+  so the reactivity calculation (treatment − control) is unaffected.
+- `dtw.base`: binarized reference base — may be a letter (A/C/G/T) or integer (0=A,1=C,2=G,3=T).
+  `perbase_signal_deviation.py` uses this for nucleotide identity; falls back to pysam FASTA
+  lookup only if `dtw.base` is absent.
+- Column names for chromosome/position vary by uncalled4 version: `ref`/`seq_name`/`chr`
+  and `pos`/`seq_pos`/`ref_pos` — `perbase_signal_deviation.py` handles all variants.
+- `-p` (processes) defaults to **1** in uncalled4 — always pass `-t {threads}` from Snakemake.
+
+**Dorado model config:**
+- Default model: `sup` (super accuracy shorthand); full model name e.g. `dna_r10.4.1_e8.2_400bps_sup@v5.2.0`
+- Override with `^dorado-model <model>` in CONFIG
+- Dorado must be installed separately (not on conda): https://github.com/nanoporetech/dorado/releases
+
+**Uncalled4 installation (js4007 known issues):**
+```bash
+pip install setuptools==69.5.1   # REQUIRED first — newer setuptools breaks uncalled4 build
+pip install uncalled4
+pip install "pod5==0.3.10" "lib-pod5==0.3.10" "pyarrow>=14,<15"
+```
+
+**CRITICAL — pod5/pyarrow deadlock (js4007, 2026-03-25):**
+`lib-pod5 >=0.3.33` + `pyarrow >=20` deadlocks inside uncalled4's C extension during POD5 signal
+reading. Hangs indefinitely with no error message. Fix: pin `pod5==0.3.10` + `pyarrow<15`.
+
+**Uncalled4 known issues (from js4007):**
+- **Non-zero exit on partial failure:** `uncalled4 align` returns non-zero when any reads fail
+  DTW, even if most succeed. Both `Uncalled4_align.sh` and `Uncalled4_align_tsv.sh` handle this
+  with `|| true` followed by a check that the output is non-empty.
+- **`*` sentinel:** Positions where DTW fails are marked `*` in TSV columns. `perbase_signal_deviation.py`
+  handles this with `na_values=["*"]` in `pd.read_csv`.
+- **Occasional missing newlines:** Rarely, two TSV lines are concatenated without a newline, producing
+  a row with too many fields. Handled with `on_bad_lines="warn"` in `pd.read_csv`.
+- **`aln.id` is a sequential integer, not the read name:** 0-based BAM read order index.
+  (Not used in `perbase_signal_deviation.py` — we group by ref/pos only.)
+
+**Uncalled4 resource usage on WGS (js4007 benchmarks, per POD5 file):**
+- Wall time: 6–16 min
+- Peak RSS: 23–75 GB (highly variable)
+- CPU load: 560–1078% (~6–11 cores effectively)
+- Request `mem_mb=80000` in SLURM to accommodate worst-case RSS
+
+**New TEMP_OUTPUTS keys:**
+- `signal_reactivity` → `data/signal_reactivity`
+- `signal_bg` → `data/signal_bg`
+- `signal_bw` → `data/signal_bw`
+- `signal_bg_mean` → `data/signal_bg_mean`
+
+Add `^t data/signal_reactivity` etc. to CONFIG to mark as temporary.

@@ -4,7 +4,9 @@
 
 NanoPrint_toolkit is a Snakemake-based pipeline for analyzing chemical footprinting data from long-read (Oxford Nanopore) sequencing. The pipeline processes raw sequencing reads through alignment, per-base error quantification, reactivity calculation (treatment minus control), and downstream analyses including significance-filtered bigWig generation, reactive nucleotide density calculations, and feature annotation. The workflow is optimized for parallelization through chromosome-level splitting of data.
 
-However, the toolkit is composed of a series of scripts found in workflow/scripts. Thus, a user can use the pipeline as intended with snakemake, or use individal scripts as documented below.
+When raw pod5 files are provided as input, the pipeline additionally runs Dorado basecalling and Uncalled4 DTW signal alignment to produce a parallel **per-base signal deviation** track. This track reports the mean difference between the expected pore model current and the observed nanopore signal at each genomic position, enabling comparison of chemical footprinting signal via two independent approaches (base-call errors vs. raw ion current deviation).
+
+The toolkit is composed of a series of scripts found in workflow/scripts. A user can use the pipeline as intended with Snakemake, or use individual scripts as documented below.
 
 # Inputs
 
@@ -13,11 +15,20 @@ However, the toolkit is composed of a series of scripts found in workflow/script
 ### Description
 Oxford Nanopore sequencing reads for treatment and control samples. Treatment samples are typically treated with a chemical probe (e.g., permanganate) while control samples are untreated.
 
+The pipeline auto-detects the input format at runtime — no CONFIG flag required:
+- **FASTQ/BAM mode**: standard basecalled reads; produces the standard per-base error track only
+- **Pod5 mode**: raw signal files; triggers Phase 0 (Dorado basecalling + Uncalled4 signal alignment) and adds a parallel per-base signal deviation track alongside the standard error track
+
 ### Format
-Standard FASTQ (gzipped) or unaligned BAM format.
+Standard FASTQ (gzipped), unaligned BAM, or raw Oxford Nanopore pod5 files.
 
 ### Location
-`raw_data/{sample}.fastq.gz` or `raw_data/{sample}.bam`
+```
+raw_data/{sample}.fastq.gz     # gzipped FASTQ
+raw_data/{sample}.bam          # unaligned BAM (e.g., Dorado output)
+raw_data/{sample}/             # directory of .pod5 files  →  pod5 mode
+raw_data/{sample}.pod5         # single pod5 file           →  pod5 mode
+```
 
 ---
 
@@ -102,6 +113,52 @@ chr19_MATERNAL	10	A	67	0.014925
 
 ### Location
 `data/perbase_error/{genome}/{sample}_{strand}.txt.gz`
+
+---
+
+## Per-base Signal Deviation Files (pod5 mode only)
+
+### Description
+Per-base pore model signal deviation computed from Uncalled4 DTW alignment. Available only when the raw input is pod5 files. Reports the mean `dtw.model_diff` (model current − observed current, in pA) across all reads at each genomic position. Positive values indicate the observed ion current is lower than the pore model expectation.
+
+### Format
+Tab-delimited, gzipped, no header (same 5-column format as per-base error):
+| Column | Name | Description |
+|--------|------|-------------|
+| 1 | chrom | Chromosome name |
+| 2 | position | Genomic position (1-based) |
+| 3 | nucleotide | Reference nucleotide (A, C, G, T) |
+| 4 | coverage | Number of reads contributing to this position |
+| 5 | mean_deviation | Mean dtw.model_diff across reads (pA) |
+
+### Location
+`data/perbase_signal/{genome}/{sample}_{strand}.txt.gz`
+
+---
+
+## Signal Reactivity Files (pod5 mode only)
+
+### Description
+Signal reactivity values calculated as treatment signal deviation minus control signal deviation at each position (same calculation as reactivity but applied to the signal deviation track).
+
+### Format
+Identical to reactivity files (4 columns: chrom, position, nucleotide, signal_reactivity).
+
+### Location
+`data/signal_reactivity/{genome}/{sample}_{strand}_{chr}.txt.gz`
+
+---
+
+## Signal BigWig Files (pod5 mode only)
+
+### Description
+Signal reactivity data in bigWig format. Filtered by significance threshold; merged across chromosomes.
+
+### Format
+UCSC bigWig binary format.
+
+### Location
+`data/signal_bw_merged/{genome}/significance_threshold_{sig}/{sample}_{strand}.bw`
 
 ---
 
@@ -437,7 +494,9 @@ PDF (7×3 inches, 3 panels in a single row; legend on right of Reactivity panel)
 
 # Dependencies
 
-All dependencies can be installed via conda:
+## Standard Installation
+
+All standard dependencies can be installed via conda:
 
 ```bash
 conda env create -f environment.yml
@@ -450,8 +509,49 @@ conda activate nanoprint
 | Alignment | samtools, minimap2, seqtk |
 | Genomic intervals | bedtools, ucsc-bedgraphtobigwig, ucsc-bigwigtobedgraph |
 | Text processing | gawk, bc |
-| Languages | python (>=3.8), R |
+| Languages | python (>=3.8), pandas, pysam, R |
 | R packages | ggplot2, dplyr, gridExtra |
+
+## Pod5 / Signal Analysis (Optional)
+
+Required only when raw pod5 input files are used. These tools are **not** installable via conda and require separate setup.
+
+### 1. Dorado Basecaller
+
+Download a pre-built binary from the [Dorado releases page](https://github.com/nanoporetech/dorado/releases) and place it in your `PATH`:
+
+```bash
+# Example (Linux, v0.9):
+wget https://cdn.oxfordnanoportal.com/software/analysis/dorado-0.9.0-linux-x64.tar.gz
+tar -xzf dorado-0.9.0-linux-x64.tar.gz
+export PATH="$PWD/dorado-0.9.0-linux-x64/bin:$PATH"
+```
+
+GPU (CUDA) is used automatically if available. CPU basecalling is supported but slow.
+
+### 2. Uncalled4 Signal Aligner
+
+Install via pip **in the following exact order** (with the nanoprint conda environment active):
+
+```bash
+conda activate nanoprint
+
+# REQUIRED first — newer setuptools breaks the uncalled4 build
+pip install setuptools==69.5.1
+
+pip install uncalled4
+
+# CRITICAL: pin pod5 and pyarrow versions
+# lib-pod5 >=0.3.33 + pyarrow >=20 deadlocks inside uncalled4's C extension
+pip install "pod5==0.3.10" "lib-pod5==0.3.10" "pyarrow>=14,<15"
+```
+
+Verify the installation:
+
+```bash
+uncalled4 --version
+python -c "import pod5; print(pod5.__version__)"
+```
 
 # Instructions
 
@@ -503,6 +603,10 @@ Your CONFIG file should look something like this:
 #Other settings
 ^igv-bam
 ^igv-bigwig
+
+# Dorado model for pod5 basecalling (optional; default: sup)
+# Use a shorthand ('sup', 'hac', 'fast') or a full model name
+^dorado-model sup
 ```
 The wildcard variables are assigned designated as:
 
@@ -515,6 +619,7 @@ The wildcard variables are assigned designated as:
 ^t Directories containing temporary files (auto-deleted after use)
 ^igv-bam Generate strand-split BAMs and indices for IGV visualization (flag, no value)
 ^igv-bigwig Generate coverage bigWig files for each strand-split BAM (flag, no value)
+^dorado-model Dorado basecalling model for pod5 input (default: sup); applies to all pod5 samples
 
 If you want to try out alternative variables, just add another row.
 
@@ -578,11 +683,56 @@ free `open` partition, while a paid allocation ID routes to `sla-prio` with `--a
 # Pipeline
 
 ```
+ ┌──────────────────────────────────────────────────────────────────────┐
+ │         PHASE 0: POD5 RAW DATA PROCESSING  (pod5 input only)        │
+ └──────────────────────────────────────────────────────────────────────┘
+
+              ┌─────────────────────────────────────────────┐
+              │       Raw pod5 files (raw_data/{sample}/)   │
+              └─────────────────────────────────────────────┘
+                                     │
+                                     ▼
+                          ┌────────────────────────┐
+                          │  0a. dorado_basecall   │
+                          │  (Dorado_basecall.sh)  │
+                          └──────────┬─────────────┘
+                                     │ data/basecalled/{sample}.bam
+                                     │ (move tables embedded via --emit-moves)
+                          ┌──────────▼─────────────┐
+                          │  → phase 1 map_reads → │
+                          │  data/filtered_alignments/{genome}/{sample}.bam
+                          └──────────┬─────────────┘
+                                     │
+                          ┌──────────▼──────────────────────────┐
+                          │  0b. uncalled4_align                │
+                          │  (Uncalled4_align.sh)               │
+                          │  DTW signal alignment to pore model │
+                          │  runtime: 6-16 min/sample; up to    │
+                          │  75 GB RAM; request 80 GB on SLURM  │
+                          └──────────┬──────────────────────────┘
+                                     │ data/uncalled4/{genome}/{sample}.bam
+                                     │ (BAM with embedded DTW tags)
+                    ┌────────────────┴────────────────┐
+                    ▼ (for strand)                     ▼ (rev strand)
+          ┌──────────────────────┐         ┌──────────────────────┐
+          │  0c. uncalled4_      │         │  0c. uncalled4_      │
+          │   convert_tsv        │         │   convert_tsv        │
+          │  samtools view -F    │         │  samtools view -f    │
+          │  0x10 → uncalled4    │         │  0x10 → uncalled4    │
+          │  convert             │         │  convert             │
+          └──────────┬───────────┘         └──────────┬───────────┘
+                     │ uncalled4_tsv/                  │ uncalled4_tsv/
+                     │ {genome}/{sample}_for.tsv       │ {genome}/{sample}_rev.tsv
+                     │                                 │
+                     └──────────────┬──────────────────┘
+                                    │ (→ phase 2b)
+
  ┌─────────────────────────────────────────────┐
  │           PHASE 1: MAPPING & QC             │
  └─────────────────────────────────────────────┘
               ┌─────────────────────────────────────────────┐
-              │      Raw reads (fastq, unaligned bam)       │
+              │   Raw reads (fastq, unaligned bam, or       │
+              │   data/basecalled/{sample}.bam from phase 0)│
               └─────────────────────────────────────────────┘
                                      │
                     ┌────────────────┼───────────────────┐
@@ -628,6 +778,27 @@ free `open` partition, while a paid allocation ID routes to `sla-prio` with `--a
                                │
                                │  (per chromosome)
                                │
+┌──────────────────────────────────────────────────────────────────────┐
+│   PHASE 2b: PER-BASE SIGNAL DEVIATION  (pod5 input only)            │
+└──────────────────────────────────────────────────────────────────────┘
+  (from data/uncalled4_tsv/{genome}/{sample}_{strand}.tsv, phase 0)
+                                         │
+                                         ▼
+                              ┌─────────────────────────┐
+                              │ 2b-1. perbase_signal_   │
+                              │       deviation         │
+                              │(perbase_signal_         │
+                              │ deviation.py)           │
+                              └───────────┬─────────────┘
+                                          │ data/perbase_signal/
+                                          ▼
+                              ┌─────────────────────────┐
+                              │ 2b-2. split_signal_by_  │
+                              │       chr_{genome}      │
+                              └───────────┬─────────────┘
+                                          │ data/perbase_signal_by_chr/
+                                          │ (→ phase 3b)
+
 ┌───────────────────────┐      ┼──────────────────────────────────┐
 │ PHASE 3: REACTIVITY   │      │                                  │
 └───────────────────────┘      │                                  │
@@ -686,6 +857,28 @@ free `open` partition, while a paid allocation ID routes to `sla-prio` with `--a
                │    (mean_bg_to_bw.sh)        │              │    │
                └──────────────────────────────┘              │    │
                                                              │    │
+┌──────────────────────────────────────────────────────────────────────┐
+│  PHASE 3b/4b: SIGNAL REACTIVITY & OUTPUT FORMATS (pod5 input only)  │
+└──────────────────────────────────────────────────────────────────────┘
+  (from data/perbase_signal_by_chr/, phase 2b)
+                    │
+                    ▼
+       ┌──────────────────────────────┐
+       │ 3b. calculate_signal_        │
+       │     reactivity               │
+       │ (Calculate_reactivity.sh)    │
+       └──────────────┬───────────────┘
+                      │ data/signal_reactivity/
+                      ▼
+       ┌──────────────────────────────┐
+       │ 4b. signal_reactivity_to_   │
+       │     bedgraph → bigwig →     │
+       │     merge_signal_bigwig     │
+       │ (same scripts as phase 4)   │
+       └──────────────┬───────────────┘
+                      │ data/signal_bw_merged/{genome}/
+                      │ significance_threshold_{sig}/{sample}_{strand}.bw
+
 ┌──────────────────────────────┐                             │    │
 │ PHASE 5: FEATURE ANNOTATION  │                             │    │
 └──────────────────────────────┘                             │    │
@@ -767,6 +960,155 @@ free `open` partition, while a paid allocation ID routes to `sla-prio` with `--a
 ```
 
 # Commands
+
+---
+
+## 0a. dorado_basecall (pod5 mode)
+
+**Description:** Basecall raw Oxford Nanopore pod5 files using Dorado, emitting move tables required by Uncalled4.
+
+**Script:** `workflow/scripts/Dorado_basecall.sh`
+
+**Inputs:**
+- `raw_data/{sample}/` (pod5 directory) or `raw_data/{sample}.pod5`
+
+**Outputs:**
+- `data/basecalled/{sample}.bam` (unsorted, unaligned; sorted/aligned in subsequent map_reads step)
+
+**Dependencies:**
+- dorado (separate binary download; see Dependencies section)
+- samtools
+
+**Documentation:**
+
+```
+Usage: Dorado_basecall.sh -i <pod5_dir_or_file> -o <output.bam> -m <model> [-t <threads>]
+
+Basecall Oxford Nanopore pod5 files using Dorado.
+Emits move tables (--emit-moves) required by Uncalled4 signal alignment.
+
+Required arguments:
+    -i    Input: pod5 directory or single pod5 file
+    -o    Output BAM file
+    -m    Dorado model ('sup', 'hac', 'fast', or full model name)
+
+Optional arguments:
+    -t    Number of threads (default: 1; GPU usage controlled by dorado itself)
+    -h    Show this help message
+
+Notes:
+    - GPU is used automatically if available; set CUDA_VISIBLE_DEVICES to control
+    - Output BAM is unsorted; the pipeline sorts it after alignment in map_reads
+
+Example:
+    Dorado_basecall.sh -i raw_data/Sample01/ -o data/basecalled/Sample01.bam -m sup -t 4
+```
+
+---
+
+## 0b. uncalled4_align (pod5 mode)
+
+**Description:** Align raw nanopore signal to the pore model using Uncalled4 DTW alignment. Produces a BAM with embedded DTW tags (compact; used by uncalled4_convert_tsv). This is the computationally expensive step — run once per sample.
+
+**Script:** `workflow/scripts/Uncalled4_align.sh`
+
+**Inputs:**
+- `data/filtered_alignments/{genome}/{sample}.bam` (sequence-level alignments from map_reads)
+- `raw_data/{sample}/` (pod5 files for raw signal)
+- `resources/genomes/{genome}.fa`
+
+**Outputs:**
+- `data/uncalled4/{genome}/{sample}.bam` (Uncalled4 BAM with DTW tags)
+- `data/uncalled4/{genome}/{sample}.bam.bai` (BAM index)
+
+**Dependencies:**
+- uncalled4 (pip install; see Dependencies section)
+- samtools
+
+**Resource requirements (WGS, from js4007 benchmarks):**
+- Wall time: 6–16 minutes per sample per BAM file
+- Peak RSS: 23–75 GB (request `mem_mb=80000` on SLURM)
+- CPU load: 560–1078% (effectively 6–11 cores)
+
+**Documentation:**
+
+```
+Usage: Uncalled4_align.sh -i <filtered.bam> -p <pod5_dir> -g <genome.fa> -o <out.bam> [-t <threads>]
+
+Align raw nanopore signals to the pore model reference using Uncalled4 (BAM output).
+Input BAM must have sequence-level alignments (from minimap2) and a move table
+(--emit-moves from Dorado) so Uncalled4 can trace each read's signal.
+
+Required arguments:
+    -i    Input sequence-aligned BAM (filtered_alignments/{genome}/{sample}.bam)
+    -p    Pod5 file directory or single pod5 file
+    -g    Reference genome FASTA
+    -o    Output Uncalled4 BAM with DTW signal alignment
+
+Optional arguments:
+    -t    Number of parallel processes for Uncalled4 (default: 8)
+    -h    Show this help message
+
+Notes:
+    - uncalled4 returns non-zero when any reads fail DTW (even if most succeed);
+      the script catches this with || true and verifies the output is non-empty.
+    - Command syntax: uncalled4 align --bam-in <bam> --ref <fa> --reads <pod5> -p <N> -o <out.bam>
+
+Example:
+    Uncalled4_align.sh -i data/filtered_alignments/genome/Sample01.bam \
+        -p raw_data/Sample01/ -g resources/genomes/genome.fa \
+        -o data/uncalled4/genome/Sample01.bam -t 8
+```
+
+---
+
+## 0c. uncalled4_convert_tsv (pod5 mode)
+
+**Description:** Convert an Uncalled4 BAM to a strand-specific DTW TSV without re-running signal alignment. Pre-filters to one strand via `samtools view`, then calls `uncalled4 convert`. Run once per strand (for and rev) after `uncalled4_align`.
+
+**Script:** `workflow/scripts/Uncalled4_convert_tsv.sh`
+
+**Inputs:**
+- `data/uncalled4/{genome}/{sample}.bam` (Uncalled4 BAM from `uncalled4_align`)
+- `data/uncalled4/{genome}/{sample}.bam.bai`
+
+**Outputs:**
+- `data/uncalled4_tsv/{genome}/{sample}_{strand}.tsv`
+
+**Dependencies:**
+- uncalled4
+- samtools
+
+**Documentation:**
+
+```
+Usage: Uncalled4_convert_tsv.sh -i <uncalled4.bam> -o <out.tsv> -s <for|rev> [-t <threads>]
+
+Convert an Uncalled4 signal-alignment BAM to a strand-specific DTW TSV.
+Pre-filters the BAM to the requested strand with samtools view, then calls
+"uncalled4 convert" to extract DTW columns without re-running alignment.
+
+Required arguments:
+    -i    Input Uncalled4 BAM (data/uncalled4/{genome}/{sample}.bam)
+    -o    Output TSV (dtw metrics per read × reference position)
+    -s    Strand: for (forward, -F 0x10) or rev (reverse, -f 0x10)
+
+Optional arguments:
+    -t    Number of parallel processes for uncalled4 convert (default: 4)
+    -h    Show this help message
+
+TSV columns extracted:
+    dtw.current       Normalized mean read signal current (pA)
+    dtw.current_sd    Signal current standard deviation
+    dtw.start         Signal sample start index in raw trace
+    dtw.length        Number of signal samples spanning this position
+    dtw.model_diff    Model current - observed current (pA); positive = observed < expected
+    dtw.base          Reference base (letter or integer-encoded: 0=A,1=C,2=G,3=T)
+
+Example:
+    Uncalled4_convert_tsv.sh -i data/uncalled4/genome/Sample01.bam \
+        -o data/uncalled4_tsv/genome/Sample01_for.tsv -s for -t 4
+```
 
 ---
 
@@ -1136,6 +1478,62 @@ Output format (tab-delimited with header):
 
 Example:
     Correlation.sh -a sample1.txt.gz -b sample2.txt.gz -g genome.fa.fai -o correlation.txt -s 10000
+```
+
+---
+
+## 2b. perbase_signal_deviation (pod5 mode)
+
+**Description:** Compute per-base pore model signal deviation from an Uncalled4 DTW TSV. Groups per-read DTW measurements by reference position and computes mean `dtw.model_diff` (model − observed current, pA). Output uses the same 5-column format as `perbase_error` so all downstream reactivity and bigWig rules can be reused.
+
+**Script:** `workflow/scripts/perbase_signal_deviation.py`
+
+**Inputs:**
+- `data/uncalled4_tsv/{genome}/{sample}_{strand}.tsv` (strand-specific TSV from `uncalled4_convert_tsv`)
+- `resources/genomes/{genome}.fa` (fallback for nucleotide lookup if dtw.base absent)
+
+**Outputs:**
+- `data/perbase_signal/{genome}/{sample}_{strand}.txt.gz`
+
+**Dependencies:**
+- python3, pandas, pysam (fallback only)
+
+**Documentation:**
+
+```
+Usage: perbase_signal_deviation.py -i <dtw.tsv> -g <genome.fa> -o <output.txt.gz>
+
+Compute per-base pore model signal deviation from an Uncalled4 DTW TSV.
+
+Required arguments:
+    -i    Input Uncalled4 DTW TSV (strand-filtered; produced by uncalled4_convert_tsv)
+    -g    Reference genome FASTA (fallback for nucleotide lookup if dtw.base absent)
+    -o    Output file (.txt.gz)
+
+Optional arguments:
+    -c    Minimum coverage to emit a position (default: 1)
+
+Input TSV columns (subset used):
+    dtw.model_diff    Model current - observed current (pA); the signal deviation metric
+    dtw.base          Reference base (letter or integer; handled automatically)
+    ref / seq_name    Chromosome name (column name varies by uncalled4 version)
+    pos / seq_pos     0-based reference position (converted to 1-based in output)
+
+Output format (tab-delimited, gzipped):
+    Column 1: Chromosome name
+    Column 2: Position (1-based)
+    Column 3: Nucleotide (from dtw.base; pysam FASTA as fallback)
+    Column 4: Coverage (reads at this position)
+    Column 5: Mean signal deviation (mean dtw.model_diff, pA)
+
+Notes:
+    - dtw.model_diff = model - observed (positive = observed current lower than expected)
+    - Positions where DTW failed (marked '*' in TSV) are excluded (read as NaN)
+    - Handles uncalled4 version differences in column naming automatically
+
+Example:
+    perbase_signal_deviation.py -i data/uncalled4_tsv/genome/Sample01_for.tsv \
+        -g resources/genomes/genome.fa -o data/perbase_signal/genome/Sample01_for.txt.gz
 ```
 
 ---
@@ -2149,3 +2547,77 @@ rule split_perbase_by_chr_chicken_v23:
 - **Always regenerate after CONFIG changes**: Run `./workflow/scripts/CONFIG.sh` whenever you modify the CONFIG file
 - **genome_specific_rules.smk is not tracked by git**: This file is generated fresh for each implementation and should not be committed
 - **Multi-genome support**: Each genome in CONFIG gets its own splitting rule with the correct chromosome list
+
+## Pod5 Auto-Detection and Signal Analysis Track
+
+### How Pod5 Mode Is Triggered
+
+The pipeline detects pod5 input automatically at Snakemake run time via the `has_pod5()` function (defined in `workflow/rules/phase0_pod5_processing.smk`):
+
+1. Checks for `raw_data/{sample}/` directory containing `.pod5` files
+2. Checks for `raw_data/{sample}.pod5` single file
+3. If either exists → pod5 mode; otherwise → standard FASTQ/BAM mode
+
+No CONFIG flag is needed. The `find_raw_reads()` function in phase 1 returns `data/basecalled/{sample}.bam` when pod5 is detected, causing Snakemake to add `dorado_basecall` as an upstream dependency automatically.
+
+### Signal Analysis Data Flow
+
+The signal deviation track runs in parallel with the standard error track:
+
+```
+pod5 → dorado_basecall → (basecalled BAM)
+                              ↓
+                     map_reads + filter_alignments
+                              ↓
+              ┌───────────────┴────────────────┐
+              ↓                                ↓
+       perbase_error                    uncalled4_align
+       (standard error track)           (signal alignment, 6-16 min)
+              ↓                                ↓
+       data/perbase_error/         uncalled4_convert_tsv (×2: for + rev)
+                                               ↓
+                                    data/uncalled4_tsv/
+                                               ↓
+                                    perbase_signal_deviation
+                                               ↓
+                                    data/perbase_signal/
+                                    (same 5-col format → reuses all downstream rules)
+```
+
+Because the per-base signal deviation files share the 5-column format with per-base error, the entire reactivity → bedGraph → bigWig pipeline (phases 3b/4b) reuses the same bash scripts (`Calculate_reactivity.sh`, `react_to_bg.sh`, `bg_to_bw.sh`, etc.) with different input/output paths.
+
+### Uncalled4 Known Issues
+
+| Issue | Symptom | Fix |
+|-------|---------|-----|
+| Non-zero exit on partial DTW failure | Script aborts even though most reads succeeded | `|| true` in scripts + non-empty output check |
+| `*` sentinel for DTW failures | TSV column has `*` instead of a number | `na_values=["*"]` in `pd.read_csv` |
+| Missing newlines between TSV rows | Row with too many fields | `on_bad_lines="warn"` in `pd.read_csv` |
+| pod5/pyarrow deadlock | Hangs indefinitely inside C extension | Pin `pod5==0.3.10`, `pyarrow>=14,<15` |
+| setuptools incompatibility | `pip install uncalled4` build fails | `pip install setuptools==69.5.1` first |
+| `-p` processes defaults to 1 | Single-threaded despite Snakemake allocating 8 threads | Always pass `-p "$THREADS"` explicitly |
+
+### dtw.model_diff Sign Convention
+
+`dtw.model_diff` = **model current − observed current** (pA). This is the official uncalled4 definition (predicted minus actual):
+- **Positive** value → observed ion current is **lower** than the pore model expects
+- **Negative** value → observed current is higher than expected
+
+This sign is consistent across treatment and control samples, so the signal reactivity calculation (treatment_deviation − control_deviation) correctly captures chemical modification-induced changes.
+
+### SLURM Resource Requirements for Uncalled4
+
+From js4007 benchmarks on WGS data:
+
+| Metric | Range |
+|--------|-------|
+| Wall time per sample | 6–16 minutes |
+| Peak RSS | 23–75 GB |
+| Effective CPU cores | 6–11 (560–1078% CPU load) |
+
+**Recommended SLURM request:**
+- `--mem=80G` (to accommodate worst-case 75 GB RSS)
+- `--ntasks=8` or `--cpus-per-task=8` (uncalled4 with `-p 8`)
+- `--time=0:30:00` (30 minutes is sufficient for most WGS samples)
+
+The `uncalled4_align` Snakemake rule uses `threads: 8` which reserves 64 GB on Roar's standard partition (8 GB/core), which is adequate for most samples but may be marginal for the worst-case 75 GB peak.
