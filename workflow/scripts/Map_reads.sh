@@ -1,7 +1,10 @@
 #!/bin/bash
+set -euo pipefail
 
 # Description: Map raw reads to reference genome using minimap2 and sort with samtools
 # Usage: ./Map_reads.sh -i <input_file> -o <output_file> -g <genome.fasta> -T <temp_dir> -t <threads>
+# When input is a BAM (e.g. dorado basecalled), mv/ts/pi/sp/ns tags are preserved via
+# samtools fastq -T and minimap2 -y so Uncalled4 can use them downstream.
 
 # Function to display usage
 usage() {
@@ -64,20 +67,20 @@ if [[ -z "$TMP_DIR" ]]; then
 fi
 mkdir -p "$TMP_DIR"
 
-# Map reads and output to SAM format
-
+# Map reads and output to BAM format
+# BAM input: pipe samtools fastq (preserving dorado tags) → minimap2 -y (propagate tags) → sort
+# FASTQ input: pipe minimap2 → sort directly
+echo "Sorting the output..."
 if [ "${IS_BAM}" = true ]; then
-    echo "Mapping BAM file ${INPUT_FILE}..."
-    FASTQ_FILE="${INPUT_FILE}.bam"
-    samtools fastq "${INPUT_FILE}" > "${FASTQ_FILE}"
+    echo "Mapping BAM file ${INPUT_FILE} (preserving mv/ts tags for Uncalled4)..."
+    samtools fastq -T "mv,ts,pi,sp,ns" "${INPUT_FILE}" \
+        | minimap2 -y -a -x lr:hq -t "${THREADS}" "${GENOME_FILE}" - \
+        | samtools sort -@ "${THREADS}" -T "${TMP_DIR}/sort_tmp" -o "${OUTPUT_FILE}"
 else
     echo "Mapping FASTQ file ${INPUT_FILE}..."
-    FASTQ_FILE="${INPUT_FILE}"
+    minimap2 -a -x lr:hq -t "${THREADS}" "${GENOME_FILE}" "${INPUT_FILE}" \
+        | samtools sort -@ "${THREADS}" -T "${TMP_DIR}/sort_tmp" -o "${OUTPUT_FILE}"
 fi
-
-echo "Sorting the output..."
-minimap2 -a -x lr:hq -t "${THREADS}" "${GENOME_FILE}" "${FASTQ_FILE}" \
-    | samtools sort -@ "${THREADS}" -T "${TMP_DIR}/sort_tmp" -o "${OUTPUT_FILE}"
 
 echo "Mapping completed. Sorted BAM file available at ${OUTPUT_FILE}."
 

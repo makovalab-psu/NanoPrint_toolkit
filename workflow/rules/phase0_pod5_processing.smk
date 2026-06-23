@@ -62,13 +62,13 @@ rule dorado_basecall:
 rule uncalled4_align:
     """Align raw nanopore signals to pore model using Uncalled4 (BAM output, all strands).
     Used by perbase_error (strand filtering happens inside that script via samtools view).
-    --bam-in must be the dorado basecalled BAM (data/basecalled/), NOT filtered_alignments.
-    minimap2 strips the dorado mv (move table) tag; uncalled4 needs it for DTW alignment.
-    uncalled4 performs its own internal alignment to the reference genome.
+    --bam-in requires a reference-aligned BAM that retains the dorado mv/ts/pi/sp/ns tags.
+    Map_reads.sh preserves these tags via samtools fastq -T + minimap2 -y, so the tags
+    survive through aligned_reads → filtered_alignments.
     Command syntax: uncalled4 align --bam-in --ref --reads -o (confirmed from js4004).
     """
     input:
-        bam="data/basecalled/{raw_sample}.bam",
+        bam="data/filtered_alignments/{genome}/{raw_sample}.bam",
         pod5=lambda wildcards: get_pod5_dir(wildcards.raw_sample),
         genome="resources/genomes/{genome}.fa"
     output:

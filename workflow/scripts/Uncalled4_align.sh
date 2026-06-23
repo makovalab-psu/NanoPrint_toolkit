@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # Uncalled4_align.sh - Align raw nanopore signals to the pore model using Uncalled4
-# Takes the dorado basecalled BAM (with move table, --emit-moves) and the original pod5 files.
-# DO NOT pass a minimap2-aligned BAM — minimap2 strips the dorado mv tag that uncalled4 needs.
-# uncalled4 performs its own internal alignment to the reference genome.
+# Takes a reference-aligned BAM with dorado move tags (mv,ts,pi,sp,ns) and pod5 files.
+# The BAM must be aligned AND retain the move tags from dorado --emit-moves.
+# Map_reads.sh preserves these tags via samtools fastq -T "mv,ts,pi,sp,ns" + minimap2 -y.
 # Produces a BAM with signal-level DTW alignment data.
 #
-# Usage: Uncalled4_align.sh -i <basecalled.bam> -p <pod5_path> -g <genome.fa> -o <out.bam> [-t <threads>]
+# Usage: Uncalled4_align.sh -i <filtered_alignments.bam> -p <pod5_path> -g <genome.fa> -o <out.bam> [-t <threads>]
 #
 # Pod5 path may be a single .pod5 file or a directory. For directories, the script
 # uses find to enumerate all .pod5 files recursively into a temp list and passes that
@@ -18,16 +18,15 @@ set -euo pipefail
 
 usage() {
     cat << EOF
-Usage: $(basename "$0") -i <basecalled.bam> -p <pod5_path> -g <genome.fa> -o <out.bam> [-t <threads>]
+Usage: $(basename "$0") -i <filtered_alignments.bam> -p <pod5_path> -g <genome.fa> -o <out.bam> [-t <threads>]
 
 Align raw nanopore signals to the pore model reference using Uncalled4 (BAM output).
-Input BAM must be the dorado basecalled BAM (data/basecalled/{sample}.bam) with the
-move table (--emit-moves) intact. DO NOT use a minimap2-aligned BAM — minimap2 strips
-the mv tag, causing "moves missing" for all reads. uncalled4 aligns to the reference
-internally.
+Input BAM must be a reference-aligned BAM that retains dorado move tags (mv, ts, pi, sp, ns).
+Map_reads.sh produces this via: samtools fastq -T "mv,ts,pi,sp,ns" | minimap2 -y -a ...
+The tags survive through filter_alignments (samtools view preserves all BAM tags by default).
 
 Required arguments:
-    -i    Input dorado basecalled BAM with move table (data/basecalled/{sample}.bam)
+    -i    Reference-aligned BAM with move tags (data/filtered_alignments/{genome}/{sample}.bam)
     -p    Absolute path to pod5 directory or single pod5 file
     -g    Reference genome FASTA
     -o    Output Uncalled4 BAM with DTW signal alignment
@@ -38,7 +37,7 @@ Optional arguments:
 
 Example:
     $(basename "$0") \\
-        -i data/basecalled/Sample01.bam \\
+        -i data/filtered_alignments/genome/Sample01.bam \\
         -p /absolute/path/to/pod5/run01/ \\
         -g resources/genomes/genome.fa \\
         -o data/uncalled4/genome/Sample01.bam \\
