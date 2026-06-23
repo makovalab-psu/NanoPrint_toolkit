@@ -141,7 +141,13 @@ if [[ "$READ_COUNT" -eq 0 ]]; then
     exit 1
 fi
 
+# uncalled4 writes reads in processing order, not coordinate order — sort before indexing.
 echo ""
+echo "Sorting output BAM..."
+SORTED_TMP="${TMP_DIR}/sorted.bam"
+samtools sort -@ "$THREADS" -T "${TMP_DIR}/sort_tmp2" -o "$SORTED_TMP" "$OUTPUT"
+mv "$SORTED_TMP" "$OUTPUT"
+
 echo "Indexing output BAM..."
 samtools index "$OUTPUT"
 
