@@ -6,8 +6,9 @@
 #
 # Usage: Uncalled4_align.sh -i <filtered.bam> -p <pod5_path> -g <genome.fa> -o <out.bam> [-t <threads>]
 #
-# Pod5 path may be a single .pod5 file or a directory. Directories are passed
-# directly to uncalled4 --reads; the pod5 C++ library (>= 0.3.x) searches recursively.
+# Pod5 path may be a single .pod5 file or a directory. For directories, the script
+# uses find to enumerate all .pod5 files recursively into a temp list and passes that
+# to uncalled4 --reads (uncalled4 does not recurse into subdirectories by default).
 # Command syntax: uncalled4 align --bam-in <bam> --ref <fa> --reads <pod5> -o <out.bam> -p <n>
 # Parallelism via -p (official docs: default is 1 process).
 
@@ -89,6 +90,11 @@ fi
 OUT_DIR=$(dirname "$OUTPUT")
 mkdir -p "$OUT_DIR"
 
+TMP_DIR="${OUT_DIR}/tmp_$$"
+mkdir -p "$TMP_DIR"
+cleanup() { [[ -d "$TMP_DIR" ]] && rm -rf "$TMP_DIR"; }
+trap cleanup EXIT
+
 echo "=== Uncalled4 Signal Alignment (BAM) ==="
 echo "Input BAM:   $INPUT_BAM"
 echo "Pod5 path:   $POD5_DIR"
@@ -97,12 +103,24 @@ echo "Output:      $OUTPUT"
 echo "Processes:   $THREADS"
 echo ""
 
+POD5_INPUT="$POD5_DIR"
+if [[ -d "$POD5_DIR" ]]; then
+    POD5_LIST="$TMP_DIR/pod5_files.txt"
+    find "$POD5_DIR" -name "*.pod5" -type f | sort > "$POD5_LIST"
+    if [[ ! -s "$POD5_LIST" ]]; then
+        echo "Error: no .pod5 files found under $POD5_DIR" >&2
+        exit 1
+    fi
+    echo "Found $(wc -l < "$POD5_LIST") pod5 file(s) (recursive search)"
+    POD5_INPUT="$POD5_LIST"
+fi
+
 # uncalled4 returns non-zero when any reads fail DTW (even if most succeed).
 # Use || true and verify the output is non-empty (pattern from js4007/Snakefile).
 uncalled4 align \
     --bam-in "$INPUT_BAM" \
     --ref    "$GENOME" \
-    --reads  "$POD5_DIR" \
+    --reads  "$POD5_INPUT" \
     -p       "$THREADS" \
     -o       "$OUTPUT" || true
 

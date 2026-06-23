@@ -952,16 +952,40 @@ signal alignment — use this to avoid running the expensive align step twice.
 - Override with `^dorado-model <model>` in CONFIG
 - Dorado must be installed separately (not on conda): https://github.com/nanoporetech/dorado/releases
 
-**Uncalled4 installation (js4007 known issues):**
+**Uncalled4 installation:**
 ```bash
 pip install setuptools==69.5.1   # REQUIRED first — newer setuptools breaks uncalled4 build
 pip install uncalled4
-pip install "pod5==0.3.10" "lib-pod5==0.3.10" "pyarrow>=14,<15"
+pip install "pod5" "pyarrow>=14,<20"
 ```
 
 **CRITICAL — pod5/pyarrow deadlock (js4007, 2026-03-25):**
 `lib-pod5 >=0.3.33` + `pyarrow >=20` deadlocks inside uncalled4's C extension during POD5 signal
-reading. Hangs indefinitely with no error message. Fix: pin `pod5==0.3.10` + `pyarrow<15`.
+reading. Hangs indefinitely with no error message. Fix: pin `pyarrow<20`.
+NOTE: `lib-pod5==0.3.10` does not exist on PyPI (only 0.3.35, 0.3.36, 0.3.39 are available).
+Pinning `pyarrow<20` is sufficient regardless of which pod5 version is installed.
+
+**Dorado — directory input requires `--recursive` (js4016, 2026-06-23):**
+`dorado basecaller <model> <dir>` does NOT recurse into subdirectories by default. Sequencer
+output directories always have pod5 files in a subdirectory (e.g. `pod5_pass/`). Without
+`--recursive`, dorado reports "Failed to determine sequencing chemistry from data" and exits.
+`Dorado_basecall.sh` now detects directory input and adds `--recursive` automatically.
+
+**Dorado — GPU resource constraint (js4016, 2026-06-23):**
+Each dorado job grabs ALL available GPUs. Running two jobs simultaneously on a 2-GPU node
+causes CUDA out-of-memory. Fix: add `resources: gpu=1` to the `dorado_basecall` Snakemake rule
+and run with `--resources gpu=1` to serialize dorado jobs:
+```bash
+snakemake --cores 8 --resources gpu=1
+```
+
+**Uncalled4 — does NOT recurse into subdirectories (js4016, 2026-06-23):**
+`uncalled4 align --reads <dir>` scans only the top-level directory. Pod5 files nested in
+`pod5_pass/` etc. are not found, causing `ValueError: No objects to concatenate` in
+`read_index.py`. Fix: `Uncalled4_align.sh` uses `find` to enumerate all pod5 files
+recursively into a temp `.txt` list and passes that to `--reads` (uncalled4 accepts a file
+list when given a `.txt` path). The original incorrect comment claiming pod5 C++ lib recurses
+has been corrected.
 
 **Uncalled4 known issues (from js4007):**
 - **Non-zero exit on partial failure:** `uncalled4 align` returns non-zero when any reads fail
