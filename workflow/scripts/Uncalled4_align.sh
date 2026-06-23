@@ -1,10 +1,12 @@
 #!/bin/bash
 
 # Uncalled4_align.sh - Align raw nanopore signals to the pore model using Uncalled4
-# Takes a sequence-aligned BAM (filtered_alignments) and the original pod5 files.
+# Takes the dorado basecalled BAM (with move table, --emit-moves) and the original pod5 files.
+# DO NOT pass a minimap2-aligned BAM — minimap2 strips the dorado mv tag that uncalled4 needs.
+# uncalled4 performs its own internal alignment to the reference genome.
 # Produces a BAM with signal-level DTW alignment data.
 #
-# Usage: Uncalled4_align.sh -i <filtered.bam> -p <pod5_path> -g <genome.fa> -o <out.bam> [-t <threads>]
+# Usage: Uncalled4_align.sh -i <basecalled.bam> -p <pod5_path> -g <genome.fa> -o <out.bam> [-t <threads>]
 #
 # Pod5 path may be a single .pod5 file or a directory. For directories, the script
 # uses find to enumerate all .pod5 files recursively into a temp list and passes that
@@ -16,15 +18,16 @@ set -euo pipefail
 
 usage() {
     cat << EOF
-Usage: $(basename "$0") -i <filtered.bam> -p <pod5_path> -g <genome.fa> -o <out.bam> [-t <threads>]
+Usage: $(basename "$0") -i <basecalled.bam> -p <pod5_path> -g <genome.fa> -o <out.bam> [-t <threads>]
 
 Align raw nanopore signals to the pore model reference using Uncalled4 (BAM output).
-Input BAM must have sequence-level alignments (from minimap2) and a move table
-(--emit-moves from dorado) so Uncalled4 can trace each read's signal back to
-the raw pod5 data.
+Input BAM must be the dorado basecalled BAM (data/basecalled/{sample}.bam) with the
+move table (--emit-moves) intact. DO NOT use a minimap2-aligned BAM — minimap2 strips
+the mv tag, causing "moves missing" for all reads. uncalled4 aligns to the reference
+internally.
 
 Required arguments:
-    -i    Input sequence-aligned BAM (filtered_alignments/{genome}/{sample}.bam)
+    -i    Input dorado basecalled BAM with move table (data/basecalled/{sample}.bam)
     -p    Absolute path to pod5 directory or single pod5 file
     -g    Reference genome FASTA
     -o    Output Uncalled4 BAM with DTW signal alignment
@@ -35,7 +38,7 @@ Optional arguments:
 
 Example:
     $(basename "$0") \\
-        -i data/filtered_alignments/genome/Sample01.bam \\
+        -i data/basecalled/Sample01.bam \\
         -p /absolute/path/to/pod5/run01/ \\
         -g resources/genomes/genome.fa \\
         -o data/uncalled4/genome/Sample01.bam \\

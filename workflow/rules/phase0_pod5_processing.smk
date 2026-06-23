@@ -24,7 +24,7 @@ def get_pod5_dir(raw_sample):
     if os.path.isdir(path):
         for _root, _dirs, files in os.walk(path):
             if any(f.endswith(".pod5") for f in files):
-                return path  # top-level dir; dorado/uncalled4 recurse internally
+                return path  # top-level dir; Dorado_basecall.sh adds --recursive, Uncalled4_align.sh uses find
     return None
 
 
@@ -62,10 +62,13 @@ rule dorado_basecall:
 rule uncalled4_align:
     """Align raw nanopore signals to pore model using Uncalled4 (BAM output, all strands).
     Used by perbase_error (strand filtering happens inside that script via samtools view).
+    --bam-in must be the dorado basecalled BAM (data/basecalled/), NOT filtered_alignments.
+    minimap2 strips the dorado mv (move table) tag; uncalled4 needs it for DTW alignment.
+    uncalled4 performs its own internal alignment to the reference genome.
     Command syntax: uncalled4 align --bam-in --ref --reads -o (confirmed from js4004).
     """
     input:
-        bam="data/filtered_alignments/{genome}/{raw_sample}.bam",
+        bam="data/basecalled/{raw_sample}.bam",
         pod5=lambda wildcards: get_pod5_dir(wildcards.raw_sample),
         genome="resources/genomes/{genome}.fa"
     output:
