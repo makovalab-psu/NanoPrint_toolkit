@@ -137,8 +137,8 @@ fi
 
 LINE_COUNT=$(wc -l < "$OUTPUT_TSV")
 if [[ "$LINE_COUNT" -le 1 ]]; then
-    echo "Error: output TSV is empty (header only, $LINE_COUNT line(s))" >&2
-    exit 1
+    echo "Warning: output TSV is empty (header only or no output, $LINE_COUNT line(s))"
+    echo "This is expected when the sample has few/no reads on this strand for this genome."
 fi
 
 echo ""

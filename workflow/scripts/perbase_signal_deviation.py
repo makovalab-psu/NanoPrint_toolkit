@@ -3,9 +3,9 @@
 perbase_signal_deviation.py - Compute per-base pore model signal deviation
 from an Uncalled4 DTW alignment TSV.
 
-The TSV is produced by Uncalled4_align_tsv.sh (already strand-filtered before
-Uncalled4 runs), using:
-  --tsv-cols "dtw.current,dtw.current_sd,dtw.start,dtw.length,dtw.model_diff,dtw.base"
+The TSV is produced by Uncalled4_convert_tsv.sh using:
+  --tsv-cols "dtw.current,dtw.current_sd,dtw.start,dtw.length,dtw.model_diff"
+Note: dtw.base is NOT requested — it is not a valid layer in current uncalled4 versions.
 
 Per js4004/workflow/scripts/parse_uncalled4_output.py:
   - Column names may contain dots (e.g. "dtw.model_diff") — normalize to underscores
@@ -122,8 +122,12 @@ def main():
     # na_values=["*"]: uncalled4 marks DTW failures with "*" (js4007 known issue).
     # on_bad_lines="warn": rarely, two TSV lines are concatenated without a newline
     #   producing a row with too many fields — skip rather than abort (js4007 known issue).
-    df = pd.read_csv(args.tsv, sep="\t", na_values=["*", "NA", "nan"],
-                     on_bad_lines="warn")
+    # EmptyDataError: uncalled4 writes a 0-byte file when no reads pass strand filtering.
+    try:
+        df = pd.read_csv(args.tsv, sep="\t", na_values=["*", "NA", "nan"],
+                         on_bad_lines="warn")
+    except pd.errors.EmptyDataError:
+        df = pd.DataFrame()
     if len(df) == 0:
         print("Warning: empty TSV input — writing empty output file")
         with gzip.open(args.output, "wt"):
