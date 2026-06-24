@@ -76,30 +76,33 @@ echo ""
 # Write header
 echo -e "Var\tValue\tCount" > "$OUTPUT"
 
+# grep returns exit code 1 when no lines match (e.g. 0-read BAM has no RL/MAPQ/ID/COV lines).
+# Use || true so set -e doesn't abort the script on empty sections.
+
 # Extract Read Length histogram (RL)
 # Format: RL	read_length	count
 echo "Extracting read length distribution (RL)..."
-grep "^RL" "$INPUT" | awk -F'\t' '{print "RL\t" $2 "\t" $3}' >> "$OUTPUT"
+grep "^RL" "$INPUT" | awk -F'\t' '{print "RL\t" $2 "\t" $3}' >> "$OUTPUT" || true
 
 # Extract Mapping Quality histogram (MAPQ)
 # Format: MAPQ	mapq_value	count
 echo "Extracting mapping quality distribution (MAPQ)..."
-grep "^MAPQ" "$INPUT" | awk -F'\t' '{print "MAPQ\t" $2 "\t" $3}' >> "$OUTPUT"
+grep "^MAPQ" "$INPUT" | awk -F'\t' '{print "MAPQ\t" $2 "\t" $3}' >> "$OUTPUT" || true
 
 # Extract Insertion size histogram (from ID lines)
 # Format: ID	length	insertions	deletions
 echo "Extracting insertion size distribution (INS)..."
-grep "^ID" "$INPUT" | awk -F'\t' '{print "INS\t" $2 "\t" $3}' >> "$OUTPUT"
+grep "^ID" "$INPUT" | awk -F'\t' '{print "INS\t" $2 "\t" $3}' >> "$OUTPUT" || true
 
 # Extract Deletion size histogram (from ID lines)
 # Format: ID	length	insertions	deletions
 echo "Extracting deletion size distribution (DEL)..."
-grep "^ID" "$INPUT" | awk -F'\t' '{print "DEL\t" $2 "\t" $4}' >> "$OUTPUT"
+grep "^ID" "$INPUT" | awk -F'\t' '{print "DEL\t" $2 "\t" $4}' >> "$OUTPUT" || true
 
 # Extract Coverage histogram (COV)
 # Format: COV	[start-end]	count
 echo "Extracting coverage distribution (COV)..."
-grep "^COV" "$INPUT" | awk -F'\t' '{print "COV\t" $2 "\t" $3}' >> "$OUTPUT"
+grep "^COV" "$INPUT" | awk -F'\t' '{print "COV\t" $2 "\t" $3}' >> "$OUTPUT" || true
 
 echo ""
 echo "Histogram data: $OUTPUT"
