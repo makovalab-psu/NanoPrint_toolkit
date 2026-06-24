@@ -137,8 +137,8 @@ fi
 
 READ_COUNT=$(samtools view -c "$OUTPUT")
 if [[ "$READ_COUNT" -eq 0 ]]; then
-    echo "Error: Uncalled4 BAM is empty (0 reads)" >&2
-    exit 1
+    echo "Warning: Uncalled4 BAM is empty (0 reads)."
+    echo "This is expected when the sample has no reads mapping to this genome."
 fi
 
 # uncalled4 writes reads in processing order, not coordinate order — sort before indexing.
