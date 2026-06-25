@@ -33,7 +33,11 @@ Output format (tab-delimited, gzipped):
     Column 2: Position in chromosome (1-based)
     Column 3: Nucleotide identity
     Column 4: Coverage
-    Column 5: Per-base error probability
+    Column 5: Mean per-base error probability
+    Column 6: Q25  — 0.25 quantile (lower 50% CI bound)
+    Column 7: Q75  — 0.75 quantile (upper 50% CI bound)
+    Column 8: Q025 — 0.025 quantile (lower 95% CI bound)
+    Column 9: Q975 — 0.975 quantile (upper 95% CI bound)
 
 Example:
     $(basename "$0") --for -i sample_filtered.bam -g reference.fasta -o sample_forward.txt.gz
@@ -98,10 +102,10 @@ if [[ ! -f "$INPUT_FASTA" ]]; then
     exit 1
 fi
 
-# Check AWK script exists
-AWK_SCRIPT="${SCRIPT_DIR}/perbase_error.awk"
-if [[ ! -f "$AWK_SCRIPT" ]]; then
-    echo "Error: AWK script not found: $AWK_SCRIPT" >&2
+# Check Python script exists
+PYTHON_SCRIPT="${SCRIPT_DIR}/perbase_error.py"
+if [[ ! -f "$PYTHON_SCRIPT" ]]; then
+    echo "Error: Python script not found: $PYTHON_SCRIPT" >&2
     exit 1
 fi
 
@@ -148,7 +152,7 @@ samtools view -b -h $SAMTOOLS_VIEW_FLAGS "$INPUT_BAM" > "$TMP_BAM"
 
 # Step 2: Run mpileup and calculate per-base error
 echo "Calculating per-base error rates..."
-samtools mpileup -f "$INPUT_FASTA" -B -Q 0 "$TMP_BAM" | awk -f "$AWK_SCRIPT" | gzip -c > "$OUTPUT"
+samtools mpileup -f "$INPUT_FASTA" -B -Q 0 "$TMP_BAM" | python3 "$PYTHON_SCRIPT" | gzip -c > "$OUTPUT"
 
 echo ""
 echo "Done. Output: $OUTPUT"

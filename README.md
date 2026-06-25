@@ -98,7 +98,7 @@ chr19_MATERNAL	245	266	GQ:HUNTER=-1.71	64	-
 ## Per-base Error Files
 
 ### Description
-Per-base error rates calculated from aligned reads, separated by strand. Error rate represents the probability of a sequencing error at each genomic position.
+Per-base error rates calculated from aligned reads, separated by strand. Reports the mean error probability at each genomic position along with quantiles that capture per-read variability.
 
 ### Format
 Tab-delimited, gzipped, no header:
@@ -108,20 +108,24 @@ Tab-delimited, gzipped, no header:
 | 2 | position | Genomic position (1-based) |
 | 3 | nucleotide | Reference nucleotide (A, C, G, T) |
 | 4 | coverage | Read coverage at position |
-| 5 | error | Per-base error probability |
+| 5 | error | Mean per-base error probability |
+| 6 | q25 | 0.25 quantile of per-read error probabilities (lower 50% CI bound) |
+| 7 | q75 | 0.75 quantile of per-read error probabilities (upper 50% CI bound) |
+| 8 | q025 | 0.025 quantile of per-read error probabilities (lower 95% CI bound) |
+| 9 | q975 | 0.975 quantile of per-read error probabilities (upper 95% CI bound) |
 
 ### Example
 ```
-chr19_MATERNAL	1	C	45	0.022222
-chr19_MATERNAL	2	C	47	0.021277
-chr19_MATERNAL	3	T	48	0.020833
-chr19_MATERNAL	4	A	52	0.019231
-chr19_MATERNAL	5	A	55	0.018182
-chr19_MATERNAL	6	C	58	0.017241
-chr19_MATERNAL	7	C	60	0.016667
-chr19_MATERNAL	8	C	62	0.016129
-chr19_MATERNAL	9	T	65	0.015385
-chr19_MATERNAL	10	A	67	0.014925
+chr19_MATERNAL	1	C	45	0.022222	0.010000	0.031623	0.001585	0.063096
+chr19_MATERNAL	2	C	47	0.021277	0.010000	0.031623	0.001585	0.063096
+chr19_MATERNAL	3	T	48	0.020833	0.010000	0.031623	0.001585	0.063096
+chr19_MATERNAL	4	A	52	0.019231	0.010000	0.025119	0.001585	0.063096
+chr19_MATERNAL	5	A	55	0.018182	0.010000	0.025119	0.001585	0.050119
+chr19_MATERNAL	6	C	58	0.017241	0.010000	0.025119	0.001585	0.050119
+chr19_MATERNAL	7	C	60	0.016667	0.010000	0.025119	0.001585	0.050119
+chr19_MATERNAL	8	C	62	0.016129	0.010000	0.025119	0.001585	0.050119
+chr19_MATERNAL	9	T	65	0.015385	0.010000	0.025119	0.001585	0.050119
+chr19_MATERNAL	10	A	67	0.014925	0.010000	0.025119	0.001585	0.050119
 ```
 
 ### Location
@@ -132,10 +136,10 @@ chr19_MATERNAL	10	A	67	0.014925
 ## Per-base Signal Deviation Files (pod5 mode only)
 
 ### Description
-Per-base pore model signal deviation computed from Uncalled4 DTW alignment. Available only when the raw input is pod5 files. Reports the mean `dtw.model_diff` (model current − observed current, in pA) across all reads at each genomic position. Positive values indicate the observed ion current is lower than the pore model expectation.
+Per-base pore model signal deviation computed from Uncalled4 DTW alignment. Available only when the raw input is pod5 files. Reports the mean `dtw.model_diff` (model current − observed current, in pA) across all reads at each genomic position, along with quantiles that capture per-read variability. Positive values indicate the observed ion current is lower than the pore model expectation.
 
 ### Format
-Tab-delimited, gzipped, no header (same 5-column format as per-base error):
+Tab-delimited, gzipped, no header (same 9-column format as per-base error):
 | Column | Name | Description |
 |--------|------|-------------|
 | 1 | chrom | Chromosome name |
@@ -143,6 +147,10 @@ Tab-delimited, gzipped, no header (same 5-column format as per-base error):
 | 3 | nucleotide | Reference nucleotide (A, C, G, T) |
 | 4 | coverage | Number of reads contributing to this position |
 | 5 | mean_deviation | Mean dtw.model_diff across reads (pA) |
+| 6 | q25 | 0.25 quantile of per-read dtw.model_diff (lower 50% CI bound, pA) |
+| 7 | q75 | 0.75 quantile of per-read dtw.model_diff (upper 50% CI bound, pA) |
+| 8 | q025 | 0.025 quantile of per-read dtw.model_diff (lower 95% CI bound, pA) |
+| 9 | q975 | 0.975 quantile of per-read dtw.model_diff (upper 95% CI bound, pA) |
 
 ### Location
 `data/perbase_signal/{genome}/{sample}_{strand}.txt.gz`
@@ -1381,7 +1389,7 @@ Example:
 
 **Dependencies:**
 - samtools
-- gawk
+- python3
 
 **Documentation:**
 
@@ -1408,7 +1416,11 @@ Output format (tab-delimited, gzipped):
     Column 2: Position in chromosome (1-based)
     Column 3: Nucleotide identity
     Column 4: Coverage
-    Column 5: Per-base error probability
+    Column 5: Mean per-base error probability
+    Column 6: Q25  — 0.25 quantile (lower 50% CI bound)
+    Column 7: Q75  — 0.75 quantile (upper 50% CI bound)
+    Column 8: Q025 — 0.025 quantile (lower 95% CI bound)
+    Column 9: Q975 — 0.975 quantile (upper 95% CI bound)
 
 Example:
     perbase_error.sh --for -i sample_filtered.bam -g reference.fasta -o sample_forward.txt.gz
@@ -1558,6 +1570,10 @@ Output format (tab-delimited, gzipped):
     Column 3: Nucleotide (from dtw.base; pysam FASTA as fallback)
     Column 4: Coverage (reads at this position)
     Column 5: Mean signal deviation (mean dtw.model_diff, pA)
+    Column 6: Q25  — 0.25 quantile of dtw.model_diff (lower 50% CI bound, pA)
+    Column 7: Q75  — 0.75 quantile of dtw.model_diff (upper 50% CI bound, pA)
+    Column 8: Q025 — 0.025 quantile of dtw.model_diff (lower 95% CI bound, pA)
+    Column 9: Q975 — 0.975 quantile of dtw.model_diff (upper 95% CI bound, pA)
 
 Notes:
     - dtw.model_diff = model - observed (positive = observed current lower than expected)
@@ -2614,7 +2630,7 @@ pod5 → dorado_basecall → (basecalled BAM)
                                     perbase_signal_deviation
                                                ↓
                                     data/perbase_signal/
-                                    (same 5-col format → reuses all downstream rules)
+                                    (same 9-col format → reuses all downstream rules)
 ```
 
 Because the per-base signal deviation files share the 5-column format with per-base error, the entire reactivity → bedGraph → bigWig pipeline (phases 3b/4b) reuses the same bash scripts (`Calculate_reactivity.sh`, `react_to_bg.sh`, `bg_to_bw.sh`, etc.) with different input/output paths.

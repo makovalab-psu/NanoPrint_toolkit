@@ -1018,6 +1018,14 @@ targets (G4 oligos ~86–89 bp), ALL reads fail the default threshold, producing
 This is safe for WGS too (long reads produce alignments >> 50 bp). First seen in js4004
 (confirmed in js4004/Snakefile lines 153, 176); re-hit in js4016 with G4 oligo genomes.
 
+**Phase 0 scripts tolerate 0-read inputs for off-target genomes (js4016, 2026-06-24):**
+Some samples have 0 reads mapping to a given genome (e.g. a control sample sequenced without
+the PolyT RC oligo). All phase 0 scripts treat this as a warning, not an error:
+- `Uncalled4_align.sh`: `Counter()` + 0-read BAM → warning, exits 0; valid empty BAM + index written
+- `Uncalled4_convert_tsv.sh`: header-only or empty TSV → warning, exits 0
+- `perbase_signal_deviation.py`: catches `EmptyDataError` + empty DataFrame → writes empty `.txt.gz`
+Downstream split/reactivity/bigwig rules receive empty inputs and produce empty outputs silently.
+
 **Uncalled4 — output BAM is unsorted; must `samtools sort` before `samtools index` (js4016, 2026-06-23):**
 `uncalled4 align` writes reads in signal-processing order, not genomic coordinate order. Passing
 the raw output directly to `samtools index` fails with:

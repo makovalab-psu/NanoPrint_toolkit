@@ -20,12 +20,16 @@ Nucleotide source (in priority order):
   2. pysam.FastaFile lookup from reference FASTA (fallback)
      - Only loaded if dtw.base is absent or unusable
 
-Output format matches perbase_error (tab-delimited, gzipped):
+Output format (tab-delimited, gzipped):
     1. Chromosome
     2. Position (1-based)
     3. Nucleotide
     4. Coverage (reads contributing to this position)
     5. Mean signal deviation (mean dtw.model_diff, pA)
+    6. Q25 — 0.25 quantile of dtw.model_diff (lower 50% CI bound, pA)
+    7. Q75 — 0.75 quantile of dtw.model_diff (upper 50% CI bound, pA)
+    8. Q025 — 0.025 quantile of dtw.model_diff (lower 95% CI bound, pA)
+    9. Q975 — 0.975 quantile of dtw.model_diff (upper 95% CI bound, pA)
 
 Usage:
     perbase_signal_deviation.py -i <dtw.tsv> -g <genome.fa> -o <output.txt.gz>
@@ -167,7 +171,14 @@ def main():
     # Group by (chromosome, position) — positions in TSV are 0-based per uncalled4 convention
     grouped = (
         df.groupby(["ref", "pos"])["dtw_model_diff"]
-        .agg(mean_dev="mean", coverage="count")
+        .agg(
+            mean_dev="mean",
+            coverage="count",
+            q25=lambda x: x.quantile(0.25),
+            q75=lambda x: x.quantile(0.75),
+            q025=lambda x: x.quantile(0.025),
+            q975=lambda x: x.quantile(0.975),
+        )
         .reset_index()
     )
 
@@ -178,6 +189,10 @@ def main():
             pos_0 = int(row["pos"])   # 0-based from uncalled4
             cov = int(row["coverage"])
             mean_dev = float(row["mean_dev"])
+            q25 = float(row["q25"])
+            q75 = float(row["q75"])
+            q025 = float(row["q025"])
+            q975 = float(row["q975"])
 
             if cov < args.min_cov:
                 continue
@@ -193,7 +208,10 @@ def main():
                     nt = "N"
 
             pos_1 = pos_0 + 1  # convert to 1-based for output
-            out.write(f"{chrom}\t{pos_1}\t{nt}\t{cov}\t{mean_dev:.6f}\n")
+            out.write(
+                f"{chrom}\t{pos_1}\t{nt}\t{cov}\t{mean_dev:.6f}"
+                f"\t{q25:.6f}\t{q75:.6f}\t{q025:.6f}\t{q975:.6f}\n"
+            )
             written += 1
 
     if fasta is not None:
