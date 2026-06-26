@@ -8,6 +8,72 @@ When raw pod5 files are provided as input, the pipeline additionally runs Dorado
 
 The toolkit is composed of a series of scripts found in workflow/scripts. A user can use the pipeline as intended with Snakemake, or use individual scripts as documented below.
 
+---
+
+# Quick Start: GPU Preprocessing (`nanoprint preprocess`)
+
+When sequencing data is raw pod5 files, the first steps — Dorado basecalling and Uncalled4 pore-model signal alignment — require a GPU and are computationally intensive. If your GPU cluster and CPU cluster are separate machines (e.g., a local GPU server and Penn State Roar), you can run these steps independently using the `nanoprint` command-line tool, then transfer the resulting Uncalled4 BAM to the CPU cluster and continue the Snakemake pipeline there.
+
+## PATH setup (one time)
+
+```bash
+export PATH="/path/to/Nanoprint_toolkit/bin:$PATH"
+# Add to ~/.bashrc or ~/.zshrc to persist
+```
+
+## Usage
+
+```bash
+nanoprint preprocess \
+    -i /path/to/pod5/file_directory \
+    -g /path/to/genome.fa \
+    -o Output_bam_file.bam \
+    -p <threads>
+```
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `-i` | yes | Pod5 file or directory (searched recursively for `.pod5` files) |
+| `-g` | yes | Reference genome FASTA |
+| `-o` | yes | Output Uncalled4 BAM file |
+| `-p` | yes | Number of threads / parallel processes |
+| `-m` | no | Dorado basecalling model (default: `sup`; also accepts `hac`, `fast`, or a full model name) |
+| `-T` | no | Directory for intermediate files (default: next to output; deleted on exit) |
+
+## What it does
+
+| Step | Tool | Result |
+|------|------|--------|
+| 1 | Dorado | pod5 → basecalled BAM (with move tables via `--emit-moves`) |
+| 2 | minimap2 | basecalled BAM → aligned BAM (move tags preserved via `-T`/`-y`) |
+| 3 | samtools | aligned BAM → filtered BAM (MAPQ ≥ 20, no secondary/supplementary) |
+| 4 | Uncalled4 | filtered BAM + pod5 → **Uncalled4 BAM** (DTW signal alignment, sorted and indexed) |
+
+Intermediate files are cleaned up automatically. The output is two files:
+- `Output_bam_file.bam` — coordinate-sorted Uncalled4 BAM with embedded DTW tags
+- `Output_bam_file.bam.bai` — BAM index
+
+## Continuing the pipeline on ROAR
+
+Transfer both output files to ROAR, then point the `^r` line in CONFIG at the Uncalled4 BAM as if it were a standard pre-aligned BAM. The pipeline will use the Uncalled4 BAM for per-base error (Phase 2) and signal deviation (Phase 2b) without re-running Phase 0.
+
+```
+# CONFIG on ROAR — use the transferred Uncalled4 BAM directly
+^r  MySample  /path/to/Output_bam_file.bam  /path/to/Control_uncalled4.bam
+```
+
+## Dependencies
+
+| Tool | Install |
+|------|---------|
+| `dorado` | Download binary from https://github.com/nanoporetech/dorado/releases |
+| `samtools`, `minimap2` | `conda install -c bioconda samtools minimap2` |
+| `uncalled4` | `pip install setuptools==69.5.1 && pip install uncalled4 && pip install "pod5" "pyarrow>=14,<20"` |
+
+See the [Dependencies](#dependencies) section for full installation details, including the critical `pyarrow<20` pin that prevents a deadlock in uncalled4.
+
+---
+
 # Inputs
 
 ## Raw Sequencing Reads
