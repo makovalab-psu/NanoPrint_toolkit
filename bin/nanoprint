@@ -125,8 +125,9 @@ cmd_preprocess() {
     fi
     mkdir -p "$TMP_DIR"
 
-    cleanup() { [[ -d "$TMP_DIR" ]] && rm -rf "$TMP_DIR"; }
-    trap cleanup EXIT
+    # Bake the literal path into the trap string now so it survives outside
+    # cmd_preprocess's local variable scope when the EXIT trap fires.
+    trap "rm -rf '${TMP_DIR}'" EXIT
 
     local BASECALLED="${TMP_DIR}/basecalled.bam"
     local ALIGNED="${TMP_DIR}/aligned.bam"
@@ -165,7 +166,7 @@ cmd_preprocess() {
         -i "$BASECALLED" \
         -o "$ALIGNED" \
         -g "$GENOME" \
-        -T "$TMP_DIR" \
+        -T "${TMP_DIR}/map_reads_tmp" \
         -t "$THREADS"
     rm -f "$BASECALLED"
     echo ""
