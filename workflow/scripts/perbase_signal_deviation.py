@@ -30,6 +30,7 @@ Output format (tab-delimited, gzipped):
     7. Q75 — 0.75 quantile of dtw.model_diff (upper 50% CI bound, pA)
     8. Q025 — 0.025 quantile of dtw.model_diff (lower 95% CI bound, pA)
     9. Q975 — 0.975 quantile of dtw.model_diff (upper 95% CI bound, pA)
+   10. Mean squared deviation — mean(dtw.model_diff^2) = sum(dtw.model_diff^2) / N (pA^2)
 
 Usage:
     perbase_signal_deviation.py -i <dtw.tsv> -g <genome.fa> -o <output.txt.gz>
@@ -178,6 +179,7 @@ def main():
             q75=lambda x: x.quantile(0.75),
             q025=lambda x: x.quantile(0.025),
             q975=lambda x: x.quantile(0.975),
+            mean_sq=lambda x: (x**2).mean(),
         )
         .reset_index()
     )
@@ -193,6 +195,7 @@ def main():
             q75 = float(row["q75"])
             q025 = float(row["q025"])
             q975 = float(row["q975"])
+            mean_sq = float(row["mean_sq"])
 
             if cov < args.min_cov:
                 continue
@@ -210,7 +213,7 @@ def main():
             pos_1 = pos_0 + 1  # convert to 1-based for output
             out.write(
                 f"{chrom}\t{pos_1}\t{nt}\t{cov}\t{mean_dev:.6f}"
-                f"\t{q25:.6f}\t{q75:.6f}\t{q025:.6f}\t{q975:.6f}\n"
+                f"\t{q25:.6f}\t{q75:.6f}\t{q025:.6f}\t{q975:.6f}\t{mean_sq:.6f}\n"
             )
             written += 1
 
