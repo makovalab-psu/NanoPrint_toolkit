@@ -1,0 +1,229 @@
+#!/bin/bash
+set -euo pipefail
+
+# Resolve toolkit root from this script's location (bin/ is one level below root)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TOOLKIT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPTS="$TOOLKIT_ROOT/workflow/scripts"
+
+# ---------------------------------------------------------------------------
+# usage helpers
+# ---------------------------------------------------------------------------
+
+usage_main() {
+    cat << EOF
+Usage: $(basename "$0") <subcommand> [options]
+
+Subcommands:
+    preprocess    Basecall pod5 files, align to a reference genome, and run
+                  Uncalled4 pore-model signal alignment. Produces a BAM ready
+                  to transfer to a CPU-only cluster (e.g. ROAR) for the
+                  remaining NanoPrint pipeline steps.
+
+Run '$(basename "$0") <subcommand> -h' for subcommand-specific help.
+
+PATH setup (add once to ~/.bashrc or ~/.zshrc):
+    export PATH="$TOOLKIT_ROOT/bin:\$PATH"
+EOF
+    exit 1
+}
+
+usage_preprocess() {
+    cat << EOF
+Usage: $(basename "$0") preprocess -i <pod5_path> -g <genome.fa> -o <output.bam> -p <threads> [-m <model>] [-T <tmp_dir>]
+
+Run all GPU-intensive preprocessing steps to produce an Uncalled4 BAM:
+
+    Step 1  dorado basecaller   pod5 → basecalled BAM (with --emit-moves)
+    Step 2  minimap2 + samtools basecalled BAM → aligned BAM (mv/ts tags preserved)
+    Step 3  samtools view       aligned BAM → filtered BAM (MAPQ >= 20, no secondary/supplementary)
+    Step 4  uncalled4 align     filtered BAM + pod5 → Uncalled4 BAM (DTW signal alignment)
+
+The output BAM (and its .bai index) can be transferred to ROAR and used as
+input to the NanoPrint Snakemake pipeline in place of Phase 0 steps.
+Intermediate files are cleaned up automatically.
+
+Required arguments:
+    -i    Pod5 file or directory (directories are searched recursively)
+    -g    Reference genome FASTA
+    -o    Output Uncalled4 BAM
+    -p    Threads / parallel processes to use
+
+Optional arguments:
+    -m    Dorado basecalling model (default: sup)
+          Examples: sup, hac, fast, dna_r10.4.1_e8.2_400bps_sup@v5.2.0
+    -T    Directory for intermediate files (default: <output_dir>/tmp_nanoprint_<PID>)
+          Deleted on exit regardless of success or failure.
+    -h    Show this help
+
+Dependencies (must be in PATH):
+    dorado      https://github.com/nanoporetech/dorado/releases
+    samtools    conda install -c bioconda samtools
+    minimap2    conda install -c bioconda minimap2
+    uncalled4   pip install uncalled4  (also: pip install "pyarrow>=14,<20")
+
+Example:
+    nanoprint preprocess \\
+        -i /data/runs/run01/pod5_pass/ \\
+        -g /references/hg38.fa \\
+        -o results/HG002_Mn04_uncalled4.bam \\
+        -p 16
+
+Output files:
+    results/HG002_Mn04_uncalled4.bam      Uncalled4 BAM (coordinate-sorted)
+    results/HG002_Mn04_uncalled4.bam.bai  BAM index
+EOF
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# preprocess subcommand
+# ---------------------------------------------------------------------------
+
+cmd_preprocess() {
+    local INPUT="" GENOME="" OUTPUT="" THREADS="" MODEL="sup" TMP_DIR=""
+
+    while getopts "i:g:o:p:m:T:h" opt; do
+        case $opt in
+            i) INPUT="$OPTARG"   ;;
+            g) GENOME="$OPTARG"  ;;
+            o) OUTPUT="$OPTARG"  ;;
+            p) THREADS="$OPTARG" ;;
+            m) MODEL="$OPTARG"   ;;
+            T) TMP_DIR="$OPTARG" ;;
+            h) usage_preprocess  ;;
+            *) usage_preprocess  ;;
+        esac
+    done
+
+    # --- validate required arguments ---
+    local missing=0
+    [[ -z "$INPUT"   ]] && { echo "Error: -i (pod5 input) is required"   >&2; missing=1; }
+    [[ -z "$GENOME"  ]] && { echo "Error: -g (genome FASTA) is required" >&2; missing=1; }
+    [[ -z "$OUTPUT"  ]] && { echo "Error: -o (output BAM) is required"   >&2; missing=1; }
+    [[ -z "$THREADS" ]] && { echo "Error: -p (threads) is required"      >&2; missing=1; }
+    [[ $missing -eq 1 ]] && usage_preprocess
+
+    [[ ! -e "$INPUT"  ]] && { echo "Error: Input not found: $INPUT"          >&2; exit 1; }
+    [[ ! -f "$GENOME" ]] && { echo "Error: Genome FASTA not found: $GENOME"  >&2; exit 1; }
+
+    # --- check dependencies ---
+    for tool in dorado samtools minimap2 uncalled4; do
+        command -v "$tool" &>/dev/null || {
+            echo "Error: '$tool' not found in PATH" >&2
+            exit 1
+        }
+    done
+
+    # --- set up output and temp directories ---
+    mkdir -p "$(dirname "$OUTPUT")"
+    local OUT_DIR
+    OUT_DIR="$(cd "$(dirname "$OUTPUT")" && pwd)"
+
+    if [[ -z "$TMP_DIR" ]]; then
+        TMP_DIR="${OUT_DIR}/tmp_nanoprint_$$"
+    fi
+    mkdir -p "$TMP_DIR"
+
+    # Bake the literal path into the trap string now so it survives outside
+    # cmd_preprocess's local variable scope when the EXIT trap fires.
+    trap "rm -rf '${TMP_DIR}'" EXIT
+
+    local BASECALLED="${TMP_DIR}/basecalled.bam"
+    local ALIGNED="${TMP_DIR}/aligned.bam"
+    local FILTERED="${TMP_DIR}/filtered.bam"
+
+    echo "========================================"
+    echo " NanoPrint preprocess"
+    echo "========================================"
+    printf "%-10s %s\n" "Input:"   "$INPUT"
+    printf "%-10s %s\n" "Genome:"  "$GENOME"
+    printf "%-10s %s\n" "Output:"  "$OUTPUT"
+    printf "%-10s %s\n" "Threads:" "$THREADS"
+    printf "%-10s %s\n" "Model:"   "$MODEL"
+    printf "%-10s %s\n" "Tmp dir:" "$TMP_DIR"
+    echo "========================================"
+    echo ""
+
+    # -----------------------------------------------------------------------
+    # Step 1: Dorado basecalling
+    # -----------------------------------------------------------------------
+    echo "[1/4] Dorado basecalling (model: $MODEL)..."
+    "$SCRIPTS/Dorado_basecall.sh" \
+        -i "$INPUT" \
+        -o "$BASECALLED" \
+        -m "$MODEL" \
+        -t "$THREADS"
+    echo ""
+
+    # -----------------------------------------------------------------------
+    # Step 2: Align to genome (preserving dorado move tags for Uncalled4)
+    # samtools fastq -T "mv,ts,pi,sp,ns" | minimap2 -y keeps the tags that
+    # uncalled4 needs for DTW signal alignment.
+    # -----------------------------------------------------------------------
+    echo "[2/4] Aligning to genome with minimap2 (preserving move tags)..."
+    "$SCRIPTS/Map_reads.sh" \
+        -i "$BASECALLED" \
+        -o "$ALIGNED" \
+        -g "$GENOME" \
+        -T "${TMP_DIR}/map_reads_tmp" \
+        -t "$THREADS"
+    rm -f "$BASECALLED"
+    echo ""
+
+    # -----------------------------------------------------------------------
+    # Step 3: Filter alignments
+    # MAPQ >= 20, remove secondary (0x100) and supplementary (0x800).
+    # samtools view preserves all BAM tags, so mv/ts/pi/sp/ns tags survive.
+    # -----------------------------------------------------------------------
+    echo "[3/4] Filtering alignments (MAPQ >= 20, no secondary/supplementary)..."
+    "$SCRIPTS/Filter_alignments.sh" \
+        -i "$ALIGNED" \
+        -o "$FILTERED"
+    samtools index "$FILTERED"
+    rm -f "$ALIGNED"
+    echo ""
+
+    # -----------------------------------------------------------------------
+    # Step 4: Uncalled4 signal alignment
+    # Uncalled4_align.sh handles: recursive pod5 discovery, --min-aln-length 50,
+    # || true on non-zero exit, samtools sort, samtools index.
+    # -----------------------------------------------------------------------
+    echo "[4/4] Uncalled4 pore-model signal alignment..."
+    "$SCRIPTS/Uncalled4_align.sh" \
+        -i "$FILTERED" \
+        -p "$INPUT" \
+        -g "$GENOME" \
+        -o "$OUTPUT" \
+        -t "$THREADS"
+    echo ""
+
+    echo "========================================"
+    echo " Done."
+    echo ""
+    printf "  %-8s %s\n" "BAM:"   "$OUTPUT"
+    printf "  %-8s %s\n" "Index:" "${OUTPUT}.bai"
+    echo ""
+    echo " Transfer both files to ROAR to continue"
+    echo " the NanoPrint pipeline."
+    echo "========================================"
+}
+
+# ---------------------------------------------------------------------------
+# main dispatch
+# ---------------------------------------------------------------------------
+
+[[ $# -eq 0 ]] && usage_main
+
+SUBCOMMAND="$1"
+shift
+
+case "$SUBCOMMAND" in
+    preprocess)  cmd_preprocess "$@" ;;
+    -h|--help)   usage_main ;;
+    *)
+        echo "Error: Unknown subcommand '$SUBCOMMAND'" >&2
+        echo "" >&2
+        usage_main
+        ;;
+esac
