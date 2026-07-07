@@ -11,10 +11,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Default coverage threshold
 COV_THRESHOLD=10
 
+# Default value field (column number)
+VALUE_FIELD=5
+
 # Usage function
 usage() {
     cat << EOF
-Usage: $(basename "$0") -p <MnO4.txt.gz> -m <CTRL.txt.gz> -o <output.txt.gz> [-c threshold] [-T tmpdir]
+Usage: $(basename "$0") -p <MnO4.txt.gz> -m <CTRL.txt.gz> -o <output.txt.gz> [-c threshold] [-f field] [-T tmpdir]
 
 Calculate reactivity from perbase error (treatment minus control).
 
@@ -25,21 +28,24 @@ Required arguments:
 
 Optional arguments:
     -c    Minimum coverage threshold (default: 10)
+    -f    Column number to use as the value metric (default: 5)
+          Use 5 for mean per-base error or mean signal deviation.
+          Use 10 for mean squared signal deviation (pA^2).
     -T    Temporary directory (default: same directory as output)
     -h    Show this help message
 
-Input format (5 columns, tab-separated):
+Input format (tab-separated; only columns 1-4 and -f are used):
     1. Chromosome name
     2. Position (1-based)
     3. Nucleotide identity
     4. Coverage
-    5. Perbase error
+    5. Value metric (or whichever column is specified with -f)
 
 Output format (4 columns, tab-separated):
     1. Chromosome name
     2. Position (1-based)
     3. Nucleotide identity
-    4. Reactivity (treatment_error - control_error)
+    4. Reactivity (treatment_value - control_value)
        Special values:
          999999  = position missing in control
         -999999  = position missing in treatment
@@ -52,6 +58,7 @@ Notes:
 Example:
     $(basename "$0") -p MnO4_chr1.txt.gz -m CTRL_chr1.txt.gz -o react_chr1.txt.gz
     $(basename "$0") -p MnO4_chr1.txt.gz -m CTRL_chr1.txt.gz -o react_chr1.txt.gz -c 20 -T /tmp
+    $(basename "$0") -p signal_MnO4_chr1.txt.gz -m signal_CTRL_chr1.txt.gz -o signal_react_chr1.txt.gz -f 10
 EOF
     exit 1
 }
@@ -62,12 +69,13 @@ MINUS=""
 OUT=""
 TMP_DIR=""
 
-while getopts "p:m:o:c:T:h" opt; do
+while getopts "p:m:o:c:f:T:h" opt; do
     case $opt in
         p) PLUS="$OPTARG" ;;
         m) MINUS="$OPTARG" ;;
         o) OUT="$OPTARG" ;;
         c) COV_THRESHOLD="$OPTARG" ;;
+        f) VALUE_FIELD="$OPTARG" ;;
         T) TMP_DIR="$OPTARG" ;;
         h) usage ;;
         *) usage ;;
@@ -121,6 +129,8 @@ trap cleanup EXIT
 # Define temp file paths
 PLUS_DECOMP="${TMP_DIR}/plus_decomp.txt"
 MINUS_DECOMP="${TMP_DIR}/minus_decomp.txt"
+PLUS_5COL="${TMP_DIR}/plus_5col.txt"
+MINUS_5COL="${TMP_DIR}/minus_5col.txt"
 PLUS_FILLED="${TMP_DIR}/plus_filled.txt"
 MINUS_FILLED="${TMP_DIR}/minus_filled.txt"
 
@@ -138,14 +148,24 @@ if [[ ! -s "$PLUS_DECOMP" || ! -s "$MINUS_DECOMP" ]]; then
     exit 0
 fi
 
+# Extract columns 1,2,3,4,VALUE_FIELD into a canonical 5-column file.
+# This lets Calculate_reactivity.sh handle perbase_signal files (10 cols)
+# and perbase_error files (5 cols) identically, regardless of which metric
+# column is selected via -f.
+echo "Extracting value column ${VALUE_FIELD} from treatment file..."
+awk -v f="$VALUE_FIELD" 'BEGIN{FS=OFS="\t"}{print $1,$2,$3,$4,$f}' "$PLUS_DECOMP" > "$PLUS_5COL"
+
+echo "Extracting value column ${VALUE_FIELD} from control file..."
+awk -v f="$VALUE_FIELD" 'BEGIN{FS=OFS="\t"}{print $1,$2,$3,$4,$f}' "$MINUS_DECOMP" > "$MINUS_5COL"
+
 # Get chromosome name from first line of treatment file
-CHR=$(head -n 1 "$PLUS_DECOMP" | cut -f1)
+CHR=$(head -n 1 "$PLUS_5COL" | cut -f1)
 echo "Chromosome: $CHR"
 
 # Determine chromosome size from max position in both files
 echo "Determining chromosome size..."
-PLUS_MAX=$(tail -n 1 "$PLUS_DECOMP" | cut -f2)
-MINUS_MAX=$(tail -n 1 "$MINUS_DECOMP" | cut -f2)
+PLUS_MAX=$(tail -n 1 "$PLUS_5COL" | cut -f2)
+MINUS_MAX=$(tail -n 1 "$MINUS_5COL" | cut -f2)
 
 if [[ "$PLUS_MAX" -gt "$MINUS_MAX" ]]; then
     CHR_SIZE="$PLUS_MAX"
@@ -157,10 +177,10 @@ echo "Chromosome size: $CHR_SIZE"
 
 # Fill in missing positions to align both files
 echo "Filling missing positions in treatment file..."
-python "$FILL_SCRIPT" "$PLUS_DECOMP" "$CHR_SIZE" "$PLUS_FILLED"
+python "$FILL_SCRIPT" "$PLUS_5COL" "$CHR_SIZE" "$PLUS_FILLED"
 
 echo "Filling missing positions in control file..."
-python "$FILL_SCRIPT" "$MINUS_DECOMP" "$CHR_SIZE" "$MINUS_FILLED"
+python "$FILL_SCRIPT" "$MINUS_5COL" "$CHR_SIZE" "$MINUS_FILLED"
 
 # Process files using awk
 # Join on chr+position, calculate reactivity

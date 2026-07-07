@@ -205,7 +205,7 @@ chr19_MATERNAL	10	A	67	0.014925	0.010000	0.025119	0.001585	0.050119
 Per-base pore model signal deviation computed from Uncalled4 DTW alignment. Available only when the raw input is pod5 files. Reports the mean `dtw.model_diff` (model current − observed current, in pA) across all reads at each genomic position, along with quantiles that capture per-read variability. Positive values indicate the observed ion current is lower than the pore model expectation.
 
 ### Format
-Tab-delimited, gzipped, no header (same 9-column format as per-base error):
+Tab-delimited, gzipped, no header (10 columns):
 | Column | Name | Description |
 |--------|------|-------------|
 | 1 | chrom | Chromosome name |
@@ -217,6 +217,7 @@ Tab-delimited, gzipped, no header (same 9-column format as per-base error):
 | 7 | q75 | 0.75 quantile of per-read dtw.model_diff (upper 50% CI bound, pA) |
 | 8 | q025 | 0.025 quantile of per-read dtw.model_diff (lower 95% CI bound, pA) |
 | 9 | q975 | 0.975 quantile of per-read dtw.model_diff (upper 95% CI bound, pA) |
+| 10 | mean_sq | Mean squared deviation — mean(dtw.model_diff²) = sum(dtw.model_diff²)/N (pA²) |
 
 ### Location
 `data/perbase_signal/{genome}/{sample}_{strand}.txt.gz`
@@ -226,7 +227,11 @@ Tab-delimited, gzipped, no header (same 9-column format as per-base error):
 ## Signal Reactivity Files (pod5 mode only)
 
 ### Description
-Signal reactivity values calculated as treatment signal deviation minus control signal deviation at each position (same calculation as reactivity but applied to the signal deviation track).
+Signal reactivity calculated as the difference in mean squared pore model signal deviation between treatment and control at each position:
+
+> signal_reactivity = mean(dtw.model_diff²)_treatment − mean(dtw.model_diff²)_control  (pA²)
+
+Mean squared deviation (column 10 of perbase_signal files) captures the magnitude of signal perturbation regardless of sign, making it a more sensitive metric for detecting chemical modification-induced changes in ion current. Positive values indicate greater signal variance in the treatment relative to control.
 
 ### Format
 Identical to reactivity files (4 columns: chrom, position, nucleotide, signal_reactivity).
@@ -1595,7 +1600,7 @@ Example:
 
 ## 2b. perbase_signal_deviation (pod5 mode)
 
-**Description:** Compute per-base pore model signal deviation from an Uncalled4 DTW TSV. Groups per-read DTW measurements by reference position and computes mean `dtw.model_diff` (model − observed current, pA). Output uses the same 5-column format as `perbase_error` so all downstream reactivity and bigWig rules can be reused.
+**Description:** Compute per-base pore model signal deviation from an Uncalled4 DTW TSV. Groups per-read DTW measurements by reference position and computes multiple statistics from `dtw.model_diff` (model − observed current, pA). The 10-column output includes mean deviation, quantiles, and mean squared deviation (pA²). The mean squared deviation (column 10) is used as the signal metric for Phase 3b reactivity calculation.
 
 **Script:** `workflow/scripts/perbase_signal_deviation.py`
 
@@ -1631,15 +1636,16 @@ Input TSV columns (subset used):
     pos / seq_pos     0-based reference position (converted to 1-based in output)
 
 Output format (tab-delimited, gzipped):
-    Column 1: Chromosome name
-    Column 2: Position (1-based)
-    Column 3: Nucleotide (from dtw.base; pysam FASTA as fallback)
-    Column 4: Coverage (reads at this position)
-    Column 5: Mean signal deviation (mean dtw.model_diff, pA)
-    Column 6: Q25  — 0.25 quantile of dtw.model_diff (lower 50% CI bound, pA)
-    Column 7: Q75  — 0.75 quantile of dtw.model_diff (upper 50% CI bound, pA)
-    Column 8: Q025 — 0.025 quantile of dtw.model_diff (lower 95% CI bound, pA)
-    Column 9: Q975 — 0.975 quantile of dtw.model_diff (upper 95% CI bound, pA)
+    Column 1:  Chromosome name
+    Column 2:  Position (1-based)
+    Column 3:  Nucleotide (from dtw.base; pysam FASTA as fallback)
+    Column 4:  Coverage (reads at this position)
+    Column 5:  Mean signal deviation (mean dtw.model_diff, pA)
+    Column 6:  Q25  — 0.25 quantile of dtw.model_diff (lower 50% CI bound, pA)
+    Column 7:  Q75  — 0.75 quantile of dtw.model_diff (upper 50% CI bound, pA)
+    Column 8:  Q025 — 0.025 quantile of dtw.model_diff (lower 95% CI bound, pA)
+    Column 9:  Q975 — 0.975 quantile of dtw.model_diff (upper 95% CI bound, pA)
+    Column 10: Mean squared deviation — mean(dtw.model_diff^2) = sum(dtw.model_diff^2)/N (pA^2)
 
 Notes:
     - dtw.model_diff = model - observed (positive = observed current lower than expected)
@@ -2696,10 +2702,11 @@ pod5 → dorado_basecall → (basecalled BAM)
                                     perbase_signal_deviation
                                                ↓
                                     data/perbase_signal/
-                                    (same 9-col format → reuses all downstream rules)
+                                    (10-col format; col 10 = mean squared deviation
+                                     used by phase 3b via Calculate_reactivity.sh -f 10)
 ```
 
-Because the per-base signal deviation files share the 5-column format with per-base error, the entire reactivity → bedGraph → bigWig pipeline (phases 3b/4b) reuses the same bash scripts (`Calculate_reactivity.sh`, `react_to_bg.sh`, `bg_to_bw.sh`, etc.) with different input/output paths.
+The per-base signal deviation files have 10 columns. Phase 3b uses `Calculate_reactivity.sh -f 10` to extract the mean squared deviation column (column 10) and compute treatment − control differences. All downstream bedGraph and bigWig steps (phases 4b) receive the resulting 4-column reactivity output and reuse the same scripts (`react_to_bg.sh`, `bg_to_bw.sh`, etc.) with different input/output paths.
 
 ### Uncalled4 Known Issues
 

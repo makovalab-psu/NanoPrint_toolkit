@@ -1,7 +1,9 @@
 # Phase 3b: Signal Reactivity Calculation
-# Computes treatment_signal_deviation - control_signal_deviation per chromosome.
-# Reuses Calculate_reactivity.sh since the 5-column format is identical to
-# perbase_error. Output paths use 'signal_reactivity' to avoid collisions.
+# Computes treatment_mean_sq - control_mean_sq per chromosome, where mean_sq
+# is mean(dtw.model_diff^2) = sum(dtw.model_diff^2)/N (pA^2, column 10 of
+# perbase_signal files). Uses Calculate_reactivity.sh with -f 10 to select
+# the mean squared deviation column from the 10-column perbase_signal format.
+# Output paths use 'signal_reactivity' to avoid collisions with perbase_error reactivity.
 
 
 def get_signal_reactivity_inputs(wildcards):
@@ -43,5 +45,6 @@ rule calculate_signal_reactivity:
             -p {input.treatment} \
             -m {input.control} \
             -o {output.reactivity} \
+            -f 10 \
             2>&1 | tee {log}
         """
