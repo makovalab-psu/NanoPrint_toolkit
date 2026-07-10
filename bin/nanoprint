@@ -37,7 +37,8 @@ Run all GPU-intensive preprocessing steps to produce an Uncalled4 BAM:
     Step 1  dorado basecaller   pod5 → basecalled BAM (with --emit-moves)
     Step 2  minimap2 + samtools basecalled BAM → aligned BAM (mv/ts tags preserved)
     Step 3  samtools view       aligned BAM → filtered BAM (MAPQ >= 20, no secondary/supplementary)
-    Step 4  uncalled4 align     filtered BAM + pod5 → Uncalled4 BAM (DTW signal alignment)
+    Step 4  uncalled4 align     filtered BAM split by pod5 source → per-pod5 Uncalled4 BAMs,
+                               merged and sorted → final Uncalled4 BAM (DTW signal alignment)
 
 The output BAM (and its .bai index) can be transferred to ROAR and used as
 input to the NanoPrint Snakemake pipeline in place of Phase 0 steps.
@@ -185,17 +186,145 @@ cmd_preprocess() {
     echo ""
 
     # -----------------------------------------------------------------------
-    # Step 4: Uncalled4 signal alignment
-    # Uncalled4_align.sh handles: recursive pod5 discovery, --min-aln-length 50,
-    # || true on non-zero exit, samtools sort, samtools index.
+    # Step 4: Uncalled4 signal alignment — batched per pod5 for sequential I/O
+    #
+    # Dorado records each read's source pod5 filename in the fn:Z: BAM tag.
+    # A single streaming pass through filtered.bam (awk) routes reads into
+    # per-pod5 BAMs by piping to samtools view. On the first read for each
+    # pod5, awk sends the BAM header through the pipe so samtools can write a
+    # valid BAM; subsequent reads flow into the already-open pipe. Each pod5
+    # batch is then aligned independently so uncalled4 reads one pod5
+    # sequentially rather than seeking randomly across all pod5 files.
+    # Results are merged, sorted, and indexed at the end.
     # -----------------------------------------------------------------------
-    echo "[4/4] Uncalled4 pore-model signal alignment..."
-    "$SCRIPTS/Uncalled4_align.sh" \
-        -i "$FILTERED" \
-        -p "$INPUT" \
-        -g "$GENOME" \
-        -o "$OUTPUT" \
-        -t "$THREADS"
+    echo "[4/4] Uncalled4 pore-model signal alignment (batched per pod5)..."
+
+    # Build pod5 file list
+    local POD5_LIST="${TMP_DIR}/pod5_files.txt"
+    if [[ -f "$INPUT" && "$INPUT" == *.pod5 ]]; then
+        echo "$INPUT" > "$POD5_LIST"
+    else
+        find "$INPUT" -name "*.pod5" -type f | sort > "$POD5_LIST"
+    fi
+    local N_POD5
+    N_POD5=$(wc -l < "$POD5_LIST")
+    [[ "$N_POD5" -eq 0 ]] && { echo "Error: No .pod5 files found under $INPUT" >&2; exit 1; }
+    echo "  Found $N_POD5 pod5 file(s)"
+
+    # Dorado writes only the basename into fn:Z:, so duplicate basenames across
+    # subdirectories would cause reads from two pod5 files to merge into one
+    # split BAM, with the second pod5's signal data silently dropped.
+    local DUP_COUNT
+    DUP_COUNT=$(awk -F/ '{print $NF}' "$POD5_LIST" | sort | uniq -d | wc -l)
+    if [[ "$DUP_COUNT" -gt 0 ]]; then
+        echo "Error: duplicate pod5 basenames found in input directory:" >&2
+        awk -F/ '{print $NF}' "$POD5_LIST" | sort | uniq -d | head -5 | sed 's/^/    /' >&2
+        echo "  nanoprint requires unique pod5 basenames across all subdirectories." >&2
+        exit 1
+    fi
+
+    # Split filtered BAM into per-pod5 BAMs.
+    # Strategy: sort by fn:Z: tag so all reads from the same pod5 are adjacent,
+    # then stream through awk keeping only ONE samtools pipe open at a time.
+    # (The naive approach of opening one pipe per pod5 simultaneously fails with
+    # EMFILE once the pod5 count exceeds ~ulimit -n / 2, typically ~500.)
+    local SPLIT_DIR="${TMP_DIR}/split"
+    mkdir -p "$SPLIT_DIR"
+    local HEADER_SAM="${SPLIT_DIR}/_header.sam"
+    samtools view -H "$FILTERED" > "$HEADER_SAM"
+
+    echo "  Sorting filtered BAM by pod5 source tag..."
+    local FN_SORTED="${TMP_DIR}/fn_sorted.bam"
+    samtools sort -@ "$THREADS" -t fn \
+        -T "${TMP_DIR}/fnsort_tmp" \
+        -o "$FN_SORTED" "$FILTERED"
+
+    echo "  Splitting by pod5 source (single pass, BAM output)..."
+    samtools view -@ "$THREADS" "$FN_SORTED" \
+      | awk -v dir="$SPLIT_DIR" -v hdr="$HEADER_SAM" '
+    BEGIN {
+        while ((getline line < hdr) > 0) header = header line "\n"
+        cur_stem = ""; cur_cmd = ""
+    }
+    {
+        fn = ""
+        for (i = 12; i <= NF; i++) {
+            if (substr($i, 1, 5) == "fn:Z:") { fn = substr($i, 6); break }
+        }
+        if (fn == "") fn = "_no_fn"
+        stem = fn; sub(/\.pod5$/, "", stem)
+        if (stem != cur_stem) {
+            if (cur_cmd != "") close(cur_cmd)
+            cur_cmd = "samtools view -bS -o " dir "/" stem ".bam"
+            printf "%s", header | cur_cmd
+            cur_stem = stem
+        }
+        print | cur_cmd
+    }
+    END { if (cur_cmd != "") close(cur_cmd) }'
+    rm -f "$FN_SORTED"
+
+    if [[ -f "${SPLIT_DIR}/_no_fn.bam" ]]; then
+        echo "  Warning: some reads lack an fn tag and were excluded" >&2
+    fi
+    echo "  Split complete."
+
+    # Process each pod5 in turn — sequential I/O, no random cross-file seeking
+    local UC4_DIR="${TMP_DIR}/uc4"
+    mkdir -p "$UC4_DIR"
+    local UC4_BAM_LIST="${TMP_DIR}/uc4_bams.txt"
+    > "$UC4_BAM_LIST"
+
+    local pod5_num=0
+    while IFS= read -r pod5_file; do
+        pod5_num=$((pod5_num + 1))
+        local fn_name
+        fn_name="$(basename "$pod5_file")"
+        local pod5_stem="${fn_name%.pod5}"
+        local split_bam="${SPLIT_DIR}/${pod5_stem}.bam"
+        local uc4_bam="${UC4_DIR}/${pod5_stem}_uc4.bam"
+
+        if [[ ! -f "$split_bam" ]]; then
+            echo "  [$pod5_num/$N_POD5] $fn_name — no reads after filtering, skipped"
+            continue
+        fi
+
+        echo "  [$pod5_num/$N_POD5] $fn_name"
+
+        samtools index "$split_bam"
+
+        # uncalled4 returns non-zero when any reads fail DTW; use || true and
+        # check for output rather than relying on exit code.
+        uncalled4 align \
+            --bam-in "$split_bam" \
+            --ref    "$GENOME" \
+            --reads  "$pod5_file" \
+            -p       "$THREADS" \
+            --min-aln-length 50 \
+            -o       "$uc4_bam" || true
+
+        rm -f "$split_bam" "${split_bam}.bai"
+
+        if [[ -f "$uc4_bam" ]]; then
+            echo "$uc4_bam" >> "$UC4_BAM_LIST"
+        else
+            echo "    Warning: uncalled4 produced no output for $fn_name" >&2
+        fi
+    done < "$POD5_LIST"
+
+    local N_UC4
+    N_UC4=$(wc -l < "$UC4_BAM_LIST")
+    if [[ "$N_UC4" -eq 0 ]]; then
+        echo "Error: Uncalled4 produced no output BAMs" >&2
+        exit 1
+    fi
+
+    # Concatenate all per-pod5 uncalled4 BAMs (unsorted), sort once, and index
+    echo ""
+    echo "  Merging $N_UC4 per-pod5 BAMs, sorting, and indexing..."
+    samtools cat -b "$UC4_BAM_LIST" \
+        | samtools sort -@ "$THREADS" -T "${TMP_DIR}/sort_tmp" -o "$OUTPUT"
+    samtools index "$OUTPUT"
     echo ""
 
     echo "========================================"

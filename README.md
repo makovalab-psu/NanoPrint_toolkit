@@ -47,7 +47,16 @@ nanoprint preprocess \
 | 1 | Dorado | pod5 → basecalled BAM (with move tables via `--emit-moves`) |
 | 2 | minimap2 | basecalled BAM → aligned BAM (move tags preserved via `-T`/`-y`) |
 | 3 | samtools | aligned BAM → filtered BAM (MAPQ ≥ 20, no secondary/supplementary) |
-| 4 | Uncalled4 | filtered BAM + pod5 → **Uncalled4 BAM** (DTW signal alignment, sorted and indexed) |
+| 4 | Uncalled4 | filtered BAM split by pod5 source → per-pod5 Uncalled4 BAMs → merged and sorted → **Uncalled4 BAM** |
+
+**Why step 4 splits by pod5:** If uncalled4 runs against all pod5 files at once on a coordinate-sorted BAM, it must seek randomly across every pod5 file to retrieve each read's raw signal — resulting in severe I/O bottlenecking (observed: 4.6% CPU utilization over 9 days on a 36-thread job). Instead, `nanoprint preprocess`:
+
+1. Checks for duplicate pod5 basenames and exits with an error if any are found (duplicate basenames would cause silent read loss, since dorado's `fn:Z:` tag stores only the basename)
+2. Sorts the filtered BAM by the `fn:Z:` tag (`samtools sort -t fn`) so reads from the same pod5 are contiguous — this allows the split pass to keep only a single pipe open at a time, avoiding OS file-descriptor limits
+3. Makes a single streaming pass through the fn-sorted BAM, routing reads into per-pod5 BAMs one at a time
+4. Runs uncalled4 on each pod5 independently — each job reads one file sequentially, eliminating random I/O
+
+**Temporary disk usage** during step 4 peaks at approximately **2× the filtered BAM size**: one copy for the fn-sorted intermediate BAM (`fn_sorted.bam` in `-T` temp dir) plus the accumulating split BAMs (deleted progressively as each pod5 batch completes). Make sure the `-T` temp directory has enough space before starting.
 
 Intermediate files are cleaned up automatically. The output is two files:
 - `Output_bam_file.bam` — coordinate-sorted Uncalled4 BAM with embedded DTW tags
