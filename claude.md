@@ -943,10 +943,15 @@ uncalled4 convert --bam-in <strand.bam> -p <threads> \
 signal alignment — use this to avoid running the expensive align step twice.
 
 **Uncalled4 TSV key column:**
-- `dtw.model_diff` (renamed to `dtw_model_diff` after loading): **model − observed** current (pA)
-  per official uncalled4 docs (predicted minus actual; positive = observed lower than expected).
-  This is the signal deviation used in phase 2b. Sign is consistent across treatment/control
-  so the reactivity calculation (treatment − control) is unaffected.
+- `dtw.model_diff` (renamed to `dtw_model_diff` after loading): **observed − model** normalized
+  current. Computed in `tracks.py:212–213` as `np.array(self.current) - self.seq.current`, where
+  `dtw.current[i]` is the mean of raw signal samples assigned to reference position `i` by DTW
+  (`aln.hpp:104`: `current[i] = seg.sum() / seg.size()`) and `seq.current[i]` is the pore model's
+  predicted mean for the k-mer at that position (`seq.hpp:374`: `model.current.mean[kmer[i]]`).
+  Both are in normalized pA units. Positive = observed signal **higher** than model; negative =
+  observed signal **lower** than model. Sign is consistent across treatment/control so the
+  reactivity calculation (treatment − control) is unaffected.
+  NOTE: the CLAUDE.md previously stated "model − observed" — this was incorrect.
 - `dtw.base`: **NOT a valid uncalled4 layer** — causes `ValueError: Invalid layer "dtw.base"` in
   current uncalled4 versions (js4016, 2026-06-23). Do NOT include in `--tsv-cols`.
   `perbase_signal_deviation.py` falls back to pysam FASTA lookup for nucleotide identity.
@@ -1068,3 +1073,95 @@ Note: this sorting step is already handled inside `Uncalled4_align.sh` — no Sn
 - `signal_bg_mean` → `data/signal_bg_mean`
 
 Add `^t data/signal_reactivity` etc. to CONFIG to mark as temporary.
+
+### nanoprint preprocess — batched per-pod5 uncalled4 (js4017, Jul 2026)
+
+**Problem: uncalled4 I/O bottleneck on many-pod5 datasets**
+
+When `nanoprint preprocess` ran `Uncalled4_align.sh` on the full filtered BAM against all pod5 files at once, uncalled4 was chronically I/O bound: 4.6% average CPU utilization over 9 days on a 36-thread job (600 CPU-minutes / 12,960 wall-clock-minutes). Root cause: the filtered BAM is coordinate-sorted, but pod5 files store reads in sequencing order. For each read in the BAM, uncalled4 must seek to whichever of the 334 pod5 files holds that read's raw signal — pure random I/O with no spatial locality.
+
+**Solution: split filtered BAM by pod5 source, run uncalled4 per pod5**
+
+Dorado records the source pod5 filename (basename only) in the `fn:Z:` BAM tag of every read. Step 4 of `nanoprint preprocess` now:
+
+1. Enumerates all pod5 files via `find`; checks for duplicate basenames (see Bug 2 below) and exits with an error if any are found
+2. Sorts the filtered BAM by the `fn:Z:` tag: `samtools sort -t fn -o fn_sorted.bam filtered.bam`
+   - This groups all reads from the same pod5 file together
+   - Eliminates the file-descriptor limit problem (see Bug 1 below)
+3. Makes a single streaming pass through `fn_sorted.bam` via awk; keeps **one** `samtools view -bS -o <stem>.bam` pipe open at a time — opens a new pipe when the stem changes, closes the old one first
+4. For each pod5 file in sequence: `samtools index` the split BAM → `uncalled4 align --reads <single pod5>` → delete the split BAM
+5. After all pod5 batches: `samtools cat -b <list> | samtools sort | samtools index` → final output
+
+This eliminates the random I/O problem: each uncalled4 invocation reads exactly one pod5 file sequentially. Temp disk during step 2 is ~1× filtered.bam for `fn_sorted.bam`; during step 3 split BAMs accumulate but are deleted progressively. Peak temp disk ≈ 2× filtered.bam size; plan accordingly when choosing `-T`.
+
+**Key implementation details:**
+
+- `fn:Z:` tag stores the **basename** of the source pod5 (e.g. `PAQ02526_0.pod5`), not the full path. The loop matches pod5 files via `basename "$pod5_file"`.
+- Reads with no `fn:Z:` tag (unusual; shouldn't occur for dorado-basecalled data) are routed to `_no_fn.bam` and excluded with a warning.
+- `Uncalled4_align.sh` is **not** called from `nanoprint preprocess` anymore; step 4 logic is now inline in `cmd_preprocess` in `bin/nanoprint`. `Uncalled4_align.sh` is still used by the Snakemake pipeline.
+- The awk keeps only **1 pipe open at a time** (made possible by the fn-tag sort in step 2); this is the fix for Bug 1 below.
+- Per-pod5 uncalled4 BAMs are unsorted (uncalled4 writes in processing order); `samtools sort` runs once at the end on the merged output.
+
+**Bugs found and fixed (js4017, Jul 2026)**
+
+**Bug 1 (critical) — awk open file descriptor limit:**
+The original implementation kept one `samtools view -bS` pipe open per pod5 file simultaneously — all of them, for the entire duration of the awk pass. Each open pipe consumes one file descriptor. Default Linux soft limit is `ulimit -n = 1024`. A PromethION run typically produces 1000–3000+ pod5 files, so awk would hit EMFILE ("too many open files") mid-split, silently stopping output to new pods or aborting entirely. Fixed by sorting filtered.bam by fn tag first (step 2), then keeping only one pipe open at a time in awk.
+
+**Bug 2 (moderate) — duplicate pod5 basenames cause silent read loss:**
+`fn:Z:` stores only the basename. If two pod5 files in different subdirectories share a basename, their reads merge into the same split BAM. The per-pod5 loop then processes that BAM against one of the two pod5 files and silently skips the second (the split BAM has already been deleted by that point). Fixed by adding a duplicate-basename check before the split pass; nanoprint exits with a clear error listing the offending names if duplicates are found.
+
+**Bug 3 (minor) — missing `-@` on samtools view decode:**
+`samtools view "$FILTERED"` in the original split pass did not use multiple threads. Fixed to `samtools view -@ "$THREADS" "$FN_SORTED"` after the fn-sort step.
+
+**Diagnosing a running uncalled4 process**
+
+- uncalled4 is **completely silent** — no per-read or per-file progress lines to stdout/stderr. `nohup.out` shows nothing after startup.
+- To check if it's still running: `ps aux | grep uncalled4`
+- To see what it's actively doing: `ls -la /proc/<PID>/fd`
+  - Output BAM open for writing (`l-wx`) = still running, hasn't closed the file
+  - A pod5 file open for reading (`lr-x`) = actively fetching raw signals from that file
+  - Many write-end pipes = communication channels to the N worker processes
+- `top -p <PID>`: the **main** uncalled4 process typically shows ~0% CPU — it coordinates workers; the actual DTW computation happens in N child processes (set by `-p N`). Near-zero CPU on the main process does not mean the job is idle.
+- The output BAM file size may **stop growing temporarily** even while uncalled4 is running — workers buffer output internally before flushing batches.
+- The currently-open pod5 file (`/proc/<PID>/fd` fd 8 in the observed run) shows which file signals are being fetched from right now, but does **not** indicate overall progress (reads are processed in BAM coordinate order, not pod5 file order).
+- Job is truly finished when: process exits AND `samtools sort` + `samtools index` have run (visible in `nohup.out`) AND the `.bai` index file exists next to the output BAM.
+
+**Bug 4 — `fn:Z:` tag dropped by `Map_reads.sh`, so every pod5 split comes back empty (js4017, Jul 2026):**
+After the per-pod5 batching split above shipped, a real run split 100% of reads into `_no_fn.bam`
+(no reads matched any of 508 real pod5 stems), and `uncalled4 align` never ran, producing
+"Error: Uncalled4 produced no output BAMs". Root cause: `Map_reads.sh`'s BAM-input path used
+`samtools fastq -T "mv,ts,pi,sp,ns"` — `fn` was never in the preserved-tag list, so it was
+silently dropped before minimap2 even saw it, even though the split logic in `bin/nanoprint`
+depends on `fn:Z:` surviving into the filtered BAM. `fn` wasn't needed by anything until the
+per-pod5 batching feature was added, and `Map_reads.sh` was never updated to match. Fixed by
+adding `fn` to the tag list: `samtools fastq -T "mv,ts,pi,sp,ns,fn"`. This tag list is
+duplicated as a comment in `Uncalled4_align.sh` (which doesn't itself need `fn`, so it wasn't
+touched) — if a future consumer needs a new dorado tag preserved through mapping, update
+`Map_reads.sh` (the actual code) and grep for other tag-list comments that describe it.
+
+**`--keep-basecalled` / `--keep-aligned` / `--keep-filtered` / `--keep-all` + auto-resume (js4017, Jul 2026):**
+Bug 4 above cost a full ~2-day Dorado basecalling rerun because `nanoprint preprocess` had no
+way to preserve step 1–3 outputs across a failed run — they lived only in the ephemeral
+`tmp_nanoprint_$$` dir, deleted by the `EXIT` trap regardless of success or failure. `cmd_preprocess`
+in `bin/nanoprint` now supports:
+
+- `--keep-basecalled` / `--keep-aligned` / `--keep-filtered`: write that step's output next to
+  `-o` instead of into `$TMP_DIR`, e.g. `<output_dir>/<output_stem>_filtered.bam` (+ `.bai` for
+  the filtered BAM). `--keep-all` sets all three.
+- **Auto-resume, independent of the flags**: at startup, `cmd_preprocess` checks for
+  `<output_stem>_filtered.bam`, then `_aligned.bam`, then `_basecalled.bam` (in that order —
+  furthest-along checkpoint wins) and skips that step and every step before it if found, reusing
+  the existing file. This works even if the flag that originally created the file isn't passed
+  on the resuming invocation — the persisted path is the only thing that matters. To force a
+  step to rerun from scratch, delete its persisted file manually.
+
+Implementation notes:
+- Argument parsing switched from `getopts` to the manual `while [[ $# -gt 0 ]]; case "$1"` loop
+  (matching `SLURM_CONFIG.sh`'s style) because `getopts` can't parse `--long-options`.
+- Skip logic is cascading, not per-step-independent: if `_filtered.bam` exists, steps 1 and 2
+  are skipped too (their outputs are never even referenced), not just step 3. This avoids
+  wastefully re-running Dorado when a later checkpoint already covers it.
+- Ephemeral intermediates are only `rm -f`'d after use if they're NOT equal to the persisted
+  path (`[[ "$BASECALLED" == "$PERSIST_BASECALLED" ]] || rm -f "$BASECALLED"`) — this correctly
+  leaves both freshly-`--keep`-written files and resumed-from-persist files untouched, while
+  still cleaning up the default ephemeral case.

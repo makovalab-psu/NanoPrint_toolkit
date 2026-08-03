@@ -30,19 +30,18 @@ EOF
 
 usage_preprocess() {
     cat << EOF
-Usage: $(basename "$0") preprocess -i <pod5_path> -g <genome.fa> -o <output.bam> -p <threads> [-m <model>] [-T <tmp_dir>]
+Usage: $(basename "$0") preprocess -i <pod5_path> -g <genome.fa> -o <output.bam> -p <threads> [-m <model>] [-T <tmp_dir>] [--keep-basecalled] [--keep-aligned] [--keep-filtered]
 
 Run all GPU-intensive preprocessing steps to produce an Uncalled4 BAM:
 
     Step 1  dorado basecaller   pod5 → basecalled BAM (with --emit-moves)
-    Step 2  minimap2 + samtools basecalled BAM → aligned BAM (mv/ts tags preserved)
+    Step 2  minimap2 + samtools basecalled BAM → aligned BAM (mv/ts/fn tags preserved)
     Step 3  samtools view       aligned BAM → filtered BAM (MAPQ >= 20, no secondary/supplementary)
     Step 4  uncalled4 align     filtered BAM split by pod5 source → per-pod5 Uncalled4 BAMs,
                                merged and sorted → final Uncalled4 BAM (DTW signal alignment)
 
 The output BAM (and its .bai index) can be transferred to ROAR and used as
 input to the NanoPrint Snakemake pipeline in place of Phase 0 steps.
-Intermediate files are cleaned up automatically.
 
 Required arguments:
     -i    Pod5 file or directory (directories are searched recursively)
@@ -54,8 +53,25 @@ Optional arguments:
     -m    Dorado basecalling model (default: sup)
           Examples: sup, hac, fast, dna_r10.4.1_e8.2_400bps_sup@v5.2.0
     -T    Directory for intermediate files (default: <output_dir>/tmp_nanoprint_<PID>)
-          Deleted on exit regardless of success or failure.
-    -h    Show this help
+          Deleted on exit regardless of success or failure. Intermediates NOT
+          persisted via --keep-* live here and are lost if a later step fails.
+    --keep-basecalled   Persist the step 1 (Dorado) output next to -o.
+    --keep-aligned      Persist the step 2 (minimap2) output next to -o.
+    --keep-filtered     Persist the step 3 (filter) output next to -o.
+    --keep-all          Shorthand for all three --keep-* flags above.
+    -h, --help    Show this help
+
+Persisted files are written as:
+    <output_dir>/<output_stem>_basecalled.bam
+    <output_dir>/<output_stem>_aligned.bam
+    <output_dir>/<output_stem>_filtered.bam (+ .bai)
+
+Auto-resume: if one of these files already exists when preprocess starts, that
+step AND every step before it are skipped, and the existing file is reused —
+even if you don't pass the matching --keep-* flag on this invocation. This is
+what protects a multi-day Dorado run from being lost to a bug discovered in a
+later step: fix the bug, rerun with the same -o, and only the failed step(s)
+redo. Delete the persisted file yourself to force a step to rerun from scratch.
 
 Dependencies (must be in PATH):
     dorado      https://github.com/nanoporetech/dorado/releases
@@ -83,17 +99,27 @@ EOF
 
 cmd_preprocess() {
     local INPUT="" GENOME="" OUTPUT="" THREADS="" MODEL="sup" TMP_DIR=""
+    local KEEP_BASECALLED=false KEEP_ALIGNED=false KEEP_FILTERED=false
 
-    while getopts "i:g:o:p:m:T:h" opt; do
-        case $opt in
-            i) INPUT="$OPTARG"   ;;
-            g) GENOME="$OPTARG"  ;;
-            o) OUTPUT="$OPTARG"  ;;
-            p) THREADS="$OPTARG" ;;
-            m) MODEL="$OPTARG"   ;;
-            T) TMP_DIR="$OPTARG" ;;
-            h) usage_preprocess  ;;
-            *) usage_preprocess  ;;
+    # Manual loop (not getopts) — needed for --keep-* long options.
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -i) INPUT="$2"; shift 2 ;;
+            -g) GENOME="$2"; shift 2 ;;
+            -o) OUTPUT="$2"; shift 2 ;;
+            -p) THREADS="$2"; shift 2 ;;
+            -m) MODEL="$2"; shift 2 ;;
+            -T) TMP_DIR="$2"; shift 2 ;;
+            --keep-basecalled) KEEP_BASECALLED=true; shift ;;
+            --keep-aligned)    KEEP_ALIGNED=true; shift ;;
+            --keep-filtered)   KEEP_FILTERED=true; shift ;;
+            --keep-all)
+                KEEP_BASECALLED=true; KEEP_ALIGNED=true; KEEP_FILTERED=true
+                shift ;;
+            -h|--help) usage_preprocess ;;
+            *)
+                echo "Error: Unknown option: $1" >&2
+                usage_preprocess ;;
         esac
     done
 
@@ -130,9 +156,18 @@ cmd_preprocess() {
     # cmd_preprocess's local variable scope when the EXIT trap fires.
     trap "rm -rf '${TMP_DIR}'" EXIT
 
-    local BASECALLED="${TMP_DIR}/basecalled.bam"
-    local ALIGNED="${TMP_DIR}/aligned.bam"
-    local FILTERED="${TMP_DIR}/filtered.bam"
+    # --keep-* flags persist intermediates next to -o instead of TMP_DIR (which
+    # is rm -rf'd on exit). If a persisted file from a prior run already
+    # exists, its step and every step before it are skipped automatically —
+    # regardless of whether --keep-* is passed this run. This is what protects
+    # a multi-day step like basecalling from being lost when a later step
+    # (e.g. Uncalled4) turns out to have a bug: fix it, rerun with the same
+    # -o, and only the failed step(s) redo.
+    local STEM
+    STEM="$(basename "$OUTPUT" .bam)"
+    local PERSIST_BASECALLED="${OUT_DIR}/${STEM}_basecalled.bam"
+    local PERSIST_ALIGNED="${OUT_DIR}/${STEM}_aligned.bam"
+    local PERSIST_FILTERED="${OUT_DIR}/${STEM}_filtered.bam"
 
     echo "========================================"
     echo " NanoPrint preprocess"
@@ -146,43 +181,88 @@ cmd_preprocess() {
     echo "========================================"
     echo ""
 
+    local BASECALLED="" ALIGNED="" FILTERED=""
+
+    if [[ -f "$PERSIST_FILTERED" ]]; then
+        echo "Found existing filtered BAM, resuming from step 4: $PERSIST_FILTERED"
+        FILTERED="$PERSIST_FILTERED"
+        [[ -f "${FILTERED}.bai" ]] || samtools index "$FILTERED"
+        echo ""
+    elif [[ -f "$PERSIST_ALIGNED" ]]; then
+        echo "Found existing aligned BAM, resuming from step 3: $PERSIST_ALIGNED"
+        ALIGNED="$PERSIST_ALIGNED"
+        echo ""
+    elif [[ -f "$PERSIST_BASECALLED" ]]; then
+        echo "Found existing basecalled BAM, resuming from step 2: $PERSIST_BASECALLED"
+        BASECALLED="$PERSIST_BASECALLED"
+        echo ""
+    fi
+
     # -----------------------------------------------------------------------
     # Step 1: Dorado basecalling
     # -----------------------------------------------------------------------
-    echo "[1/4] Dorado basecalling (model: $MODEL)..."
-    "$SCRIPTS/Dorado_basecall.sh" \
-        -i "$INPUT" \
-        -o "$BASECALLED" \
-        -m "$MODEL" \
-        -t "$THREADS"
+    if [[ -n "$BASECALLED" || -n "$ALIGNED" || -n "$FILTERED" ]]; then
+        echo "[1/4] Dorado basecalling — skipped (reusing existing output)"
+    else
+        echo "[1/4] Dorado basecalling (model: $MODEL)..."
+        if [[ "$KEEP_BASECALLED" == true ]]; then
+            BASECALLED="$PERSIST_BASECALLED"
+        else
+            BASECALLED="${TMP_DIR}/basecalled.bam"
+        fi
+        "$SCRIPTS/Dorado_basecall.sh" \
+            -i "$INPUT" \
+            -o "$BASECALLED" \
+            -m "$MODEL" \
+            -t "$THREADS"
+    fi
     echo ""
 
     # -----------------------------------------------------------------------
     # Step 2: Align to genome (preserving dorado move tags for Uncalled4)
-    # samtools fastq -T "mv,ts,pi,sp,ns" | minimap2 -y keeps the tags that
-    # uncalled4 needs for DTW signal alignment.
+    # samtools fastq -T "mv,ts,pi,sp,ns,fn" | minimap2 -y keeps the tags that
+    # uncalled4 needs for DTW signal alignment, plus the fn tag (source pod5
+    # basename) that step 4 needs to split reads by pod5.
     # -----------------------------------------------------------------------
-    echo "[2/4] Aligning to genome with minimap2 (preserving move tags)..."
-    "$SCRIPTS/Map_reads.sh" \
-        -i "$BASECALLED" \
-        -o "$ALIGNED" \
-        -g "$GENOME" \
-        -T "${TMP_DIR}/map_reads_tmp" \
-        -t "$THREADS"
-    rm -f "$BASECALLED"
+    if [[ -n "$ALIGNED" || -n "$FILTERED" ]]; then
+        echo "[2/4] Aligning to genome — skipped (reusing existing output)"
+    else
+        echo "[2/4] Aligning to genome with minimap2 (preserving move tags)..."
+        if [[ "$KEEP_ALIGNED" == true ]]; then
+            ALIGNED="$PERSIST_ALIGNED"
+        else
+            ALIGNED="${TMP_DIR}/aligned.bam"
+        fi
+        "$SCRIPTS/Map_reads.sh" \
+            -i "$BASECALLED" \
+            -o "$ALIGNED" \
+            -g "$GENOME" \
+            -T "${TMP_DIR}/map_reads_tmp" \
+            -t "$THREADS"
+        [[ "$BASECALLED" == "$PERSIST_BASECALLED" ]] || rm -f "$BASECALLED"
+    fi
     echo ""
 
     # -----------------------------------------------------------------------
     # Step 3: Filter alignments
     # MAPQ >= 20, remove secondary (0x100) and supplementary (0x800).
-    # samtools view preserves all BAM tags, so mv/ts/pi/sp/ns tags survive.
+    # samtools view preserves all BAM tags, so mv/ts/pi/sp/ns/fn tags survive.
     # -----------------------------------------------------------------------
-    echo "[3/4] Filtering alignments (MAPQ >= 20, no secondary/supplementary)..."
-    "$SCRIPTS/Filter_alignments.sh" \
-        -i "$ALIGNED" \
-        -o "$FILTERED"
-    samtools index "$FILTERED"
-    rm -f "$ALIGNED"
+    if [[ -n "$FILTERED" ]]; then
+        echo "[3/4] Filtering alignments — skipped (reusing existing output)"
+    else
+        echo "[3/4] Filtering alignments (MAPQ >= 20, no secondary/supplementary)..."
+        if [[ "$KEEP_FILTERED" == true ]]; then
+            FILTERED="$PERSIST_FILTERED"
+        else
+            FILTERED="${TMP_DIR}/filtered.bam"
+        fi
+        "$SCRIPTS/Filter_alignments.sh" \
+            -i "$ALIGNED" \
+            -o "$FILTERED"
+        samtools index "$FILTERED"
+        [[ "$ALIGNED" == "$PERSIST_ALIGNED" ]] || rm -f "$ALIGNED"
+    fi
     echo ""
 
     # -----------------------------------------------------------------------
