@@ -56,7 +56,16 @@ declare -a CONTROL_PATHS=()
 declare -a TEMP_DIRS=()
 IGV_BAM="false"
 IGV_BIGWIG="false"
-DORADO_MODEL="sup"
+# Pinned exact model with CpG 5mC/5hmC calling enabled. The pin keeps the
+# basecaller a fixed quantity across runs (the 'sup' shorthand resolves against
+# each pod5's chemistry metadata, so it can drift between runs); the
+# ,5mCG_5hmCG suffix is what makes dorado emit MM/ML tags at all, without which
+# no methylation analysis is possible and the expensive basecalling step has to
+# be repeated. A pod5 from a different chemistry will now be mis-called or
+# rejected rather than auto-matched — override with '^dorado-model sup,5mCG_5hmCG'
+# for auto-selection, or '^dorado-model sup' for the old mod-free behaviour.
+# KEEP IN SYNC with DEFAULT_DORADO_MODEL in bin/nanoprint.
+DORADO_MODEL="dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG"
 
 # Function to strip file extension
 strip_ext() {

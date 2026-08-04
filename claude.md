@@ -902,9 +902,9 @@ Pod5 input mode was added in js4016. The pipeline detects pod5 automatically at 
 ```
 raw_data/{sample}/          (pod5 files)
     ↓ dorado_basecall (phase 0)
-data/basecalled/{sample}.bam               ← has dorado mv/ts/pi/sp/ns tags (move table)
-    ↓ map_reads (phase 1) — samtools fastq -T "mv,ts,pi,sp,ns" | minimap2 -y (preserves tags)
-data/aligned_reads/{genome}/{sample}.bam   ← reference-aligned AND still has mv tags
+data/basecalled/{sample}.bam               ← dorado mv/ts/pi/sp/ns tags (move table) + MM/ML (mod calls)
+    ↓ map_reads (phase 1) — samtools fastq -T "MM,ML,mv,ts,pi,sp,ns,fn" | minimap2 -y (preserves tags)
+data/aligned_reads/{genome}/{sample}.bam   ← reference-aligned AND still has mv + MM/ML tags
     ↓ filter_alignments (phase 1) — samtools view preserves all tags by default
 data/filtered_alignments/{genome}/{sample}.bam
     ├─→ perbase_error (phase 2)            ← standard error track (unchanged)
@@ -926,7 +926,7 @@ data/signal_bw_merged/{genome}/significance_threshold_{sig}/{sample}_{strand}.bw
 ```bash
 # Step 1 — signal alignment (slow; run once per sample):
 # --bam-in must be an aligned BAM (with @SQ header) that STILL HAS the dorado mv/ts/pi/sp/ns tags.
-# Map_reads.sh preserves these via: samtools fastq -T "mv,ts,pi,sp,ns" | minimap2 -y -a ...
+# Map_reads.sh preserves these via: samtools fastq -T "MM,ML,mv,ts,pi,sp,ns,fn" | minimap2 -y -a ...
 # Use data/filtered_alignments/ (samtools view keeps all tags; the tags are already in aligned_reads).
 # Do NOT pass data/basecalled/ (unaligned BAM — no @SQ header → pysam ValueError).
 uncalled4 align --bam-in <filtered_alignments.bam> --ref <fa> --reads <pod5> -p <threads> -o <out.bam>
@@ -960,8 +960,10 @@ signal alignment — use this to avoid running the expensive align step twice.
 - `-p` (processes) defaults to **1** in uncalled4 — always pass `-t {threads}` from Snakemake.
 
 **Dorado model config:**
-- Default model: `sup` (super accuracy shorthand); full model name e.g. `dna_r10.4.1_e8.2_400bps_sup@v5.2.0`
-- Override with `^dorado-model <model>` in CONFIG
+- Default model: `dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG` — pinned exact model with CpG
+  5mC/5hmC calling enabled (see "CpG modification calling by default" below)
+- Override with `^dorado-model <model>` in CONFIG, or `-m` for `nanoprint preprocess`.
+  `sup,5mCG_5hmCG` restores chemistry auto-selection; `sup` restores the old mod-free behaviour
 - Dorado must be installed separately (not on conda): https://github.com/nanoporetech/dorado/releases
 
 **Uncalled4 installation:**
@@ -1165,3 +1167,80 @@ Implementation notes:
   path (`[[ "$BASECALLED" == "$PERSIST_BASECALLED" ]] || rm -f "$BASECALLED"`) — this correctly
   leaves both freshly-`--keep`-written files and resumed-from-persist files untouched, while
   still cleaning up the default ephemeral case.
+
+### CpG modification calling by default (js4014, Aug 2026)
+
+Dorado now calls CpG 5mC/5hmC by default, and the resulting MM/ML tags are carried
+through every step that rewrites a BAM. Two independent changes were needed; either
+one alone produces BAMs with no methylation data.
+
+**1. The default model is pinned and carries modifications.**
+
+```
+dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG
+```
+
+Set in two places that must be kept in sync — `DEFAULT_DORADO_MODEL` in
+`bin/nanoprint` (preprocess path) and `DORADO_MODEL` in `workflow/scripts/CONFIG.sh`
+(Snakemake pod5 path). `Dorado_basecall.sh` passes `-m` to dorado verbatim, so
+dorado's inline `model,mod` syntax works without any parsing on our side.
+
+`5mCG_5hmCG` is CpG-context-restricted; `5mC_5hmC` (all-context) is a different
+model and its numbers are not comparable. This matches makova_fire's FIBER-Seq
+pipeline (`sup,5mCG_5hmCG,6mA`) — comparing datasets basecalled by different
+modification models measures the models, not the samples.
+
+**Pinning the exact model gives up dorado's chemistry auto-selection.** `sup` is a
+shorthand dorado resolves against each pod5's own chemistry metadata, so two runs
+basecalled months apart can silently use different models; the pin makes the
+basecaller a fixed quantity across runs. The cost is that pod5s from another
+chemistry or sampling rate are now mis-called or rejected rather than auto-matched.
+Escape hatches: `-m sup,5mCG_5hmCG` (auto-select, keep mod calling) or `-m sup`
+(the old mod-free behaviour).
+
+Costs to expect: basecalling with modifications is slower, and dorado must fetch
+the modification model — on a compute node with no outbound network that fails
+after the queue wait. Pre-fetch on a node that has network, or set
+`DORADO_MODELS_DIRECTORY`.
+
+**2. MM/ML added to the `samtools fastq -T` allowlist in `Map_reads.sh`.**
+
+```bash
+samtools fastq -T "MM,ML,mv,ts,pi,sp,ns,fn" | minimap2 -y -a ...
+```
+
+This is the same allowlist that caused the `fn` data-loss bug (js4017, above), and
+it failed the same way a second time: a whole HG002 WGS BAM reached `modkit pileup`
+with no modification calls in it, and every record failed —
+`~9553137 failed processing / Done, processed 0 rows`. Anything not named in that
+`-T` list is dropped at alignment without a word.
+
+**3. Two runtime guards, because "silently dropped" is the recurring failure mode.**
+
+`has_mod_tags()` in `bin/nanoprint` scans the first 5000 records of a BAM for
+`MM:Z:`/`Mm:Z:`. It is used twice in `cmd_preprocess`:
+
+- **After step 2 (align):** if the basecalled BAM has modification tags and the
+  aligned BAM does not, **fail hard** with the remedy spelled out. This is the exact
+  regression that shipped twice; it must never pass silently again. The check runs
+  while the basecalled BAM is still on disk, before the ephemeral copy is deleted.
+- **After step 4 (uncalled4):** whether `uncalled4 align` propagates tags it does not
+  itself use is outside our control and **not verified**. If the tags did not survive,
+  the pre-uncalled4 filtered BAM is the last copy that has them — and unless
+  `--keep-filtered` was passed it is inside `TMP_DIR`, seconds from the `EXIT` trap.
+  The guard copies it to `<stem>_filtered.bam` and warns, rather than destroying the
+  only modBAM. Use that BAM for methylation analysis and the Uncalled4 BAM for signal
+  analysis.
+
+Note the asymmetry: step 2 is a hard error (our bug, always fixable in our code),
+step 4 is a warning plus rescue (third-party behaviour we can only work around).
+
+**Verifying end to end**, before committing to a long run — the middle line is the
+one that failed before this change:
+
+```bash
+nanoprint preprocess -i <one_pod5_file> -g <genome.fa> -o /tmp/probe.bam -p 8 --keep-all
+samtools view /tmp/probe_basecalled.bam | head -100 | grep -c 'MM:Z:'   # >0 → model is right
+samtools view /tmp/probe_aligned.bam    | head -100 | grep -c 'MM:Z:'   # >0 → tag list is right
+samtools view /tmp/probe.bam            | head -100 | grep -c 'MM:Z:'   # answers the uncalled4 question
+```

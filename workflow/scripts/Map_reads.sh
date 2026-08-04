@@ -3,9 +3,16 @@ set -euo pipefail
 
 # Description: Map raw reads to reference genome using minimap2 and sort with samtools
 # Usage: ./Map_reads.sh -i <input_file> -o <output_file> -g <genome.fasta> -T <temp_dir> -t <threads>
-# When input is a BAM (e.g. dorado basecalled), mv/ts/pi/sp/ns/fn tags are preserved via
-# samtools fastq -T and minimap2 -y so Uncalled4 can use them downstream. fn (source pod5
-# basename) is needed by nanoprint preprocess's per-pod5 batching split.
+# When input is a BAM (e.g. dorado basecalled), MM/ML/mv/ts/pi/sp/ns/fn tags are preserved
+# via samtools fastq -T and minimap2 -y so downstream tools can use them. mv/ts/pi/sp/ns are
+# the move table Uncalled4 needs; fn (source pod5 basename) is needed by nanoprint
+# preprocess's per-pod5 batching split; MM/ML are the base modification calls (5mC/5hmC).
+#
+# THIS LIST IS AN ALLOWLIST: any tag not named here is silently dropped at alignment. That
+# has already caused two real data-loss bugs — `fn` (js4017, every pod5 split came back
+# empty) and MM/ML (js4014, a whole WGS BAM reached modkit with no methylation calls in it
+# and every record failed). If a new consumer needs another dorado tag, add it HERE and
+# grep for the tag-list comments that mirror this one.
 
 # Function to display usage
 usage() {
@@ -69,8 +76,8 @@ trap cleanup EXIT
 # FASTQ input: pipe minimap2 → sort directly
 echo "Sorting the output..."
 if [ "${IS_BAM}" = true ]; then
-    echo "Mapping BAM file ${INPUT_FILE} (preserving mv/ts/fn tags for Uncalled4)..."
-    samtools fastq -T "mv,ts,pi,sp,ns,fn" "${INPUT_FILE}" \
+    echo "Mapping BAM file ${INPUT_FILE} (preserving MM/ML mod calls + mv/ts/fn tags)..."
+    samtools fastq -T "MM,ML,mv,ts,pi,sp,ns,fn" "${INPUT_FILE}" \
         | minimap2 -y -a -x lr:hq -t "${THREADS}" "${GENOME_FILE}" - \
         | samtools sort -@ "${THREADS}" -T "${TMP_DIR}/sort_tmp" -o "${OUTPUT_FILE}"
 else

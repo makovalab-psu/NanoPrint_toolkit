@@ -37,7 +37,7 @@ nanoprint preprocess \
 | `-g` | yes | Reference genome FASTA |
 | `-o` | yes | Output Uncalled4 BAM file |
 | `-p` | yes | Number of threads / parallel processes |
-| `-m` | no | Dorado basecalling model (default: `sup`; also accepts `hac`, `fast`, or a full model name) |
+| `-m` | no | Dorado basecalling model (default: `dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG` — pinned model with CpG 5mC/5hmC calling. Use `sup,5mCG_5hmCG` for chemistry auto-selection, or `sup`/`hac`/`fast` for no modification calling) |
 | `-T` | no | Directory for intermediate files (default: next to output; deleted on exit) |
 
 ## What it does
@@ -715,9 +715,11 @@ Your CONFIG file should look something like this:
 ^igv-bam
 ^igv-bigwig
 
-# Dorado model for pod5 basecalling (optional; default: sup)
-# Use a shorthand ('sup', 'hac', 'fast') or a full model name
-^dorado-model sup
+# Dorado model for pod5 basecalling (optional)
+# Default: dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG
+#   pinned model + CpG 5mC/5hmC calling (emits MM/ML modification tags)
+# 'sup,5mCG_5hmCG' auto-selects chemistry and keeps mod calling; 'sup' disables it
+^dorado-model dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG
 ```
 The wildcard variables are assigned designated as:
 
@@ -730,7 +732,7 @@ The wildcard variables are assigned designated as:
 ^t Directories containing temporary files (auto-deleted after use)
 ^igv-bam Generate strand-split BAMs and indices for IGV visualization (flag, no value)
 ^igv-bigwig Generate coverage bigWig files for each strand-split BAM (flag, no value)
-^dorado-model Dorado basecalling model for pod5 input (default: sup); applies to all pod5 samples
+^dorado-model Dorado basecalling model for pod5 input (default: `dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG`, a pinned model with CpG 5mC/5hmC calling); applies to all pod5 samples
 
 If you want to try out alternative variables, just add another row.
 
@@ -830,7 +832,10 @@ Emits move tables (--emit-moves) required by Uncalled4 signal alignment.
 Required arguments:
     -i    Input: pod5 directory or single pod5 file
     -o    Output BAM file
-    -m    Dorado model ('sup', 'hac', 'fast', or full model name)
+    -m    Dorado model. Accepts dorado's inline modification syntax, e.g.
+          dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG  (pinned model + CpG calls)
+          sup,5mCG_5hmCG                                  (auto-select + CpG calls)
+          sup / hac / fast                                (no modification calls)
 
 Optional arguments:
     -t    Number of threads (default: 1; GPU usage controlled by dorado itself)
@@ -843,7 +848,8 @@ Notes:
       files nested in sequencer output subdirectories (e.g. pod5_pass/) are found
 
 Example:
-    Dorado_basecall.sh -i /absolute/path/to/pod5/Sample01/ -o data/basecalled/Sample01.bam -m sup -t 4
+    Dorado_basecall.sh -i /absolute/path/to/pod5/Sample01/ -o data/basecalled/Sample01.bam \
+        -m dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG -t 4
 ```
 
 ---

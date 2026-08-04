@@ -7,6 +7,33 @@ TOOLKIT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SCRIPTS="$TOOLKIT_ROOT/workflow/scripts"
 
 # ---------------------------------------------------------------------------
+# Default Dorado model
+#
+# Pinned to an exact model, with CpG modification calling switched on, because
+# both properties have to be true for downstream analyses to be comparable:
+#
+#   dna_r10.4.1_e8.2_400bps_sup@v5.2.0   exact model, not the 'sup' shorthand.
+#       'sup' resolves against each pod5's own chemistry metadata, so two runs
+#       basecalled months apart can silently use different models. Pinning makes
+#       the basecaller a fixed quantity across runs. The cost is that a pod5 from
+#       another chemistry or sampling rate is now basecalled by the wrong model
+#       or rejected outright, instead of being auto-matched. Override with
+#       -m sup,5mCG_5hmCG to get auto-selection back.
+#   ,5mCG_5hmCG                          CpG-context 5mC + 5hmC calling.
+#       Dorado's inline modification syntax. Without it no MM/ML tags are
+#       produced at all and no methylation analysis is possible downstream —
+#       and since basecalling is the expensive step, a mod-free run usually
+#       means re-running it. Matches the makova_fire FIBER-Seq pipeline, which
+#       uses sup,5mCG_5hmCG,6mA; comparing datasets called by different
+#       modification models measures the models, not the samples.
+#       Use -m sup for the old modification-free behaviour.
+#
+# KEEP IN SYNC with DORADO_MODEL in workflow/scripts/CONFIG.sh, which is the
+# same default for the Snakemake (pod5-input) path.
+# ---------------------------------------------------------------------------
+DEFAULT_DORADO_MODEL="dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG"
+
+# ---------------------------------------------------------------------------
 # usage helpers
 # ---------------------------------------------------------------------------
 
@@ -50,8 +77,18 @@ Required arguments:
     -p    Threads / parallel processes to use
 
 Optional arguments:
-    -m    Dorado basecalling model (default: sup)
-          Examples: sup, hac, fast, dna_r10.4.1_e8.2_400bps_sup@v5.2.0
+    -m    Dorado basecalling model
+          Default: dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG
+            An exact pinned model with CpG 5mC/5hmC calling switched on, so
+            output BAMs carry MM/ML modification tags and runs stay comparable
+            to each other. Because the model is pinned rather than the 'sup'
+            shorthand, pod5s from a different chemistry are NOT auto-matched and
+            will be mis-called or rejected — override if your data is not
+            R10.4.1 / E8.2 / 400 bps.
+          Examples:
+            sup,5mCG_5hmCG   auto-select chemistry, keep modification calling
+            sup              auto-select chemistry, no modification calling
+            hac, fast        faster/less accurate, no modification calling
     -T    Directory for intermediate files (default: <output_dir>/tmp_nanoprint_<PID>)
           Deleted on exit regardless of success or failure. Intermediates NOT
           persisted via --keep-* live here and are lost if a later step fails.
@@ -97,8 +134,35 @@ EOF
 # preprocess subcommand
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# has_mod_tags <bam> — true if the BAM carries base modification calls.
+#
+# Scans the first MOD_TAG_SCAN_READS records rather than the whole file; dorado
+# writes MM/ML on every read of a modification basecall, so a sample this size is
+# decisive. Both spellings are checked: MM/ML is current, Mm/Ml is the older
+# hts-specs form that pre-2022 basecalls still carry.
+#
+# Used to verify that modification calls survive each step that rewrites the BAM.
+# They are dropped silently when they don't, which is a failure mode this pipeline
+# has already shipped twice (see the tag-allowlist note in Map_reads.sh).
+# ---------------------------------------------------------------------------
+MOD_TAG_SCAN_READS=5000
+
+has_mod_tags() {
+    local bam="$1" n
+    [[ -f "$bam" ]] || return 1
+    # pipefail off for this pipeline only: `samtools view | head` SIGPIPEs samtools
+    # by design once head has its lines, which would otherwise abort the script.
+    set +o pipefail
+    n=$(samtools view "$bam" 2>/dev/null \
+        | head -n "$MOD_TAG_SCAN_READS" \
+        | grep -cE "$(printf '\t')(MM|Mm):Z:" || true)
+    set -o pipefail
+    [[ "${n:-0}" -gt 0 ]]
+}
+
 cmd_preprocess() {
-    local INPUT="" GENOME="" OUTPUT="" THREADS="" MODEL="sup" TMP_DIR=""
+    local INPUT="" GENOME="" OUTPUT="" THREADS="" MODEL="$DEFAULT_DORADO_MODEL" TMP_DIR=""
     local KEEP_BASECALLED=false KEEP_ALIGNED=false KEEP_FILTERED=false
 
     # Manual loop (not getopts) — needed for --keep-* long options.
@@ -219,10 +283,12 @@ cmd_preprocess() {
     echo ""
 
     # -----------------------------------------------------------------------
-    # Step 2: Align to genome (preserving dorado move tags for Uncalled4)
-    # samtools fastq -T "mv,ts,pi,sp,ns,fn" | minimap2 -y keeps the tags that
-    # uncalled4 needs for DTW signal alignment, plus the fn tag (source pod5
-    # basename) that step 4 needs to split reads by pod5.
+    # Step 2: Align to genome (preserving dorado tags)
+    # samtools fastq -T "MM,ML,mv,ts,pi,sp,ns,fn" | minimap2 -y keeps the tags
+    # uncalled4 needs for DTW signal alignment, the fn tag (source pod5 basename)
+    # that step 4 needs to split reads by pod5, and the MM/ML base modification
+    # calls. That -T list is an allowlist — see Map_reads.sh before adding a
+    # consumer that depends on any other dorado tag.
     # -----------------------------------------------------------------------
     if [[ -n "$ALIGNED" || -n "$FILTERED" ]]; then
         echo "[2/4] Aligning to genome — skipped (reusing existing output)"
@@ -239,6 +305,29 @@ cmd_preprocess() {
             -g "$GENOME" \
             -T "${TMP_DIR}/map_reads_tmp" \
             -t "$THREADS"
+
+        # Modification calls must survive alignment. Map_reads.sh preserves tags
+        # through an explicit `samtools fastq -T` allowlist, and anything missing
+        # from that list is dropped without a word — which is how a whole WGS BAM
+        # once reached modkit with no methylation calls in it and every record
+        # failed. Checked here, while the basecalled BAM is still around to
+        # compare against, rather than discovered days downstream.
+        if has_mod_tags "$BASECALLED" && ! has_mod_tags "$ALIGNED"; then
+            echo "" >&2
+            echo "Error: base modification tags (MM/ML) are present in the basecalled BAM" >&2
+            echo "       but absent from the aligned BAM — alignment dropped them." >&2
+            echo "         basecalled: $BASECALLED" >&2
+            echo "         aligned:    $ALIGNED" >&2
+            echo "" >&2
+            echo "       Fix: add MM,ML to the tag allowlist in" >&2
+            echo "       workflow/scripts/Map_reads.sh (samtools fastq -T \"...\")." >&2
+            echo "" >&2
+            echo "       Then delete ${PERSIST_ALIGNED} if it exists and re-run with the" >&2
+            echo "       same -o. With --keep-basecalled the basecalling step is reused," >&2
+            echo "       so this costs no GPU time." >&2
+            exit 1
+        fi
+
         [[ "$BASECALLED" == "$PERSIST_BASECALLED" ]] || rm -f "$BASECALLED"
     fi
     echo ""
@@ -246,7 +335,7 @@ cmd_preprocess() {
     # -----------------------------------------------------------------------
     # Step 3: Filter alignments
     # MAPQ >= 20, remove secondary (0x100) and supplementary (0x800).
-    # samtools view preserves all BAM tags, so mv/ts/pi/sp/ns/fn tags survive.
+    # samtools view preserves all BAM tags, so MM/ML/mv/ts/pi/sp/ns/fn survive.
     # -----------------------------------------------------------------------
     if [[ -n "$FILTERED" ]]; then
         echo "[3/4] Filtering alignments — skipped (reusing existing output)"
@@ -406,6 +495,29 @@ cmd_preprocess() {
         | samtools sort -@ "$THREADS" -T "${TMP_DIR}/sort_tmp" -o "$OUTPUT"
     samtools index "$OUTPUT"
     echo ""
+
+    # uncalled4 rewrites every record, and whether it propagates tags it does not
+    # itself use is outside our control. If the modification calls did not survive
+    # it, the filtered BAM is the last copy that has them — and unless
+    # --keep-filtered was passed it lives in TMP_DIR, seconds away from the EXIT
+    # trap. Rescue it rather than silently destroying the only modBAM, which is
+    # what "retain the modification data" has to mean when the last tool in the
+    # chain is a third-party one.
+    if has_mod_tags "$FILTERED" && ! has_mod_tags "$OUTPUT"; then
+        echo "Warning: base modification tags (MM/ML) did not survive uncalled4 align." >&2
+        echo "         The Uncalled4 BAM has the DTW signal data but no methylation calls." >&2
+        if [[ "$FILTERED" == "$PERSIST_FILTERED" ]]; then
+            echo "         The modification calls are preserved in: $PERSIST_FILTERED" >&2
+        else
+            echo "         Preserving the pre-uncalled4 BAM, which still has them:" >&2
+            cp "$FILTERED" "$PERSIST_FILTERED"
+            samtools index "$PERSIST_FILTERED"
+            echo "           $PERSIST_FILTERED" >&2
+        fi
+        echo "         Use that BAM for methylation analysis (modkit etc.), and the" >&2
+        echo "         Uncalled4 BAM for signal analysis." >&2
+        echo "" >&2
+    fi
 
     echo "========================================"
     echo " Done."
