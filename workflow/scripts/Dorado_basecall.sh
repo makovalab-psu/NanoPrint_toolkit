@@ -24,7 +24,7 @@ Required arguments:
     -i    Input: pod5 directory or single pod5 file
     -o    Output BAM file (unsorted; sorted downstream by map_reads)
     -m    Dorado model. Accepts dorado's inline modification syntax, e.g.
-          dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG  (pinned model + CpG calls)
+          dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2  (pinned model + CpG calls)
           sup,5mCG_5hmCG                                  (auto-select + CpG calls)
           sup / hac / fast                                (no modification calls)
 
@@ -39,7 +39,7 @@ Notes:
 
 Example:
     $(basename "$0") -i raw_data/Sample01/ -o data/basecalled/Sample01.bam \\
-        -m dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG -t 4
+        -m dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2 -t 4
 EOF
     exit 1
 }

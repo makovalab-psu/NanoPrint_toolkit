@@ -960,7 +960,7 @@ signal alignment — use this to avoid running the expensive align step twice.
 - `-p` (processes) defaults to **1** in uncalled4 — always pass `-t {threads}` from Snakemake.
 
 **Dorado model config:**
-- Default model: `dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG` — pinned exact model with CpG
+- Default model: `dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2` — pinned exact model with CpG
   5mC/5hmC calling enabled (see "CpG modification calling by default" below)
 - Override with `^dorado-model <model>` in CONFIG, or `-m` for `nanoprint preprocess`.
   `sup,5mCG_5hmCG` restores chemistry auto-selection; `sup` restores the old mod-free behaviour
@@ -1177,13 +1177,52 @@ one alone produces BAMs with no methylation data.
 **1. The default model is pinned and carries modifications.**
 
 ```
-dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG
+dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2
 ```
 
 Set in two places that must be kept in sync — `DEFAULT_DORADO_MODEL` in
 `bin/nanoprint` (preprocess path) and `DORADO_MODEL` in `workflow/scripts/CONFIG.sh`
 (Snakemake pod5 path). `Dorado_basecall.sh` passes `-m` to dorado verbatim, so
 dorado's inline `model,mod` syntax works without any parsing on our side.
+
+**The `@v2` on the modification is required, and this is a real trap.** A bare
+modification name resolves only against the *shorthand* model. `sup,5mCG_5hmCG`
+works; `dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG` fails at parse time with
+
+```
+[error] Failed to parse model complex '...sup@v5.2.0,5mCG_5hmCG'.
+        '5mCG_5hmCG' is not a recognised model name.
+```
+
+Pinning the simplex model means pinning the modification model too. Valid pairs
+are exactly what `dorado download --list` prints under "modification models", in
+the form `<simplex>_<mod>@<ver>` — written `<simplex>,<mod>@<ver>` on the command
+line. Confirmed on the P2i 2026-08-05 (dorado 1.3.3): `sup,5mCG_5hmCG` resolved
+to `dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2`, which is where the pinned
+default comes from. It fails in under a tenth of a second, so it is cheap to
+check — but check it before starting a multi-day run, not after.
+
+**Modification models available for `sup@v5.2.0`** (dorado 1.3.3, P2i, 2026-08-05).
+Availability is version-specific — re-check `dorado download --list` rather than
+assuming this list holds for another simplex version:
+
+| Modification | Context | Note |
+|---|---|---|
+| `5mCG_5hmCG@v1`, `@v2` | CpG only | `@v2` is the pinned default |
+| `5mC_5hmC@v1`, `@v2` | all contexts | superset of the above |
+| `4mC_5mC@v1` | all contexts | bacterial methylation |
+| `6mA@v1` | — | Fiber-seq / 6mA studies |
+
+Note that `sup@v5.0.0` additionally carries `5mCG_5hmCG@v2.0.1` and `@v3`, and
+`sup@v4.2.0` carries `@v3.1` — the modification version numbering does not track
+the simplex version, which is another reason to read the list rather than guess.
+
+**Observed cost of modification basecalling** (P2i, A100 80GB, `-p 5`, 2 pod5 files
+from a PromethION LSK114 run): 61,143 reads basecalled in 472 s with
+`sup@v5.2.0,5mCG_5hmCG@v2`. Extrapolating linearly, a 500-pod5 run is roughly
+30–35 hours of GPU time — plan the `nohup`/lingering setup accordingly. The same
+run showed minimap2 peak RSS of **14.99 GB** on the human genome, confirming the
+12–16 GB figure in "map_reads: Threading and Memory" above.
 
 `5mCG_5hmCG` is CpG-context-restricted; `5mC_5hmC` (all-context) is a different
 model and its numbers are not comparable. This matches makova_fire's FIBER-Seq

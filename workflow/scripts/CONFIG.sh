@@ -65,7 +65,7 @@ IGV_BIGWIG="false"
 # rejected rather than auto-matched — override with '^dorado-model sup,5mCG_5hmCG'
 # for auto-selection, or '^dorado-model sup' for the old mod-free behaviour.
 # KEEP IN SYNC with DEFAULT_DORADO_MODEL in bin/nanoprint.
-DORADO_MODEL="dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG"
+DORADO_MODEL="dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2"
 
 # Function to strip file extension
 strip_ext() {

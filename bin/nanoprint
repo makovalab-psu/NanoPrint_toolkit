@@ -19,7 +19,7 @@ SCRIPTS="$TOOLKIT_ROOT/workflow/scripts"
 #       another chemistry or sampling rate is now basecalled by the wrong model
 #       or rejected outright, instead of being auto-matched. Override with
 #       -m sup,5mCG_5hmCG to get auto-selection back.
-#   ,5mCG_5hmCG                          CpG-context 5mC + 5hmC calling.
+#   ,5mCG_5hmCG@v2                       CpG-context 5mC + 5hmC calling.
 #       Dorado's inline modification syntax. Without it no MM/ML tags are
 #       produced at all and no methylation analysis is possible downstream —
 #       and since basecalling is the expensive step, a mod-free run usually
@@ -28,10 +28,20 @@ SCRIPTS="$TOOLKIT_ROOT/workflow/scripts"
 #       modification models measures the models, not the samples.
 #       Use -m sup for the old modification-free behaviour.
 #
+#       THE @v2 IS REQUIRED HERE. A bare modification name resolves only against
+#       the shorthand: `sup,5mCG_5hmCG` works, but
+#       `dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG` fails at parse time with
+#       "'5mCG_5hmCG' is not a recognised model name" (dorado 1.3.3). Pinning the
+#       simplex model means pinning the modification model too. The valid pairs
+#       are whatever `dorado download --list` shows under "modification models",
+#       printed as <simplex>_<mod>@<ver> — the same thing written <simplex>,<mod>@<ver>
+#       on the command line. Verified 2026-08-05: dorado resolved sup,5mCG_5hmCG
+#       to dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2 on this data.
+#
 # KEEP IN SYNC with DORADO_MODEL in workflow/scripts/CONFIG.sh, which is the
 # same default for the Snakemake (pod5-input) path.
 # ---------------------------------------------------------------------------
-DEFAULT_DORADO_MODEL="dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG"
+DEFAULT_DORADO_MODEL="dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2"
 
 # ---------------------------------------------------------------------------
 # usage helpers
@@ -78,7 +88,7 @@ Required arguments:
 
 Optional arguments:
     -m    Dorado basecalling model
-          Default: dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG
+          Default: dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2
             An exact pinned model with CpG 5mC/5hmC calling switched on, so
             output BAMs carry MM/ML modification tags and runs stay comparable
             to each other. Because the model is pinned rather than the 'sup'
