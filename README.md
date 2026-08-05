@@ -37,59 +37,65 @@ nanoprint preprocess \
 | `-g` | yes | Reference genome FASTA |
 | `-o` | yes | Output Uncalled4 BAM file |
 | `-p` | yes | Number of threads / parallel processes |
-| `-m` | no | Dorado basecalling model (default: `dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2` — pinned model with CpG 5mC/5hmC calling. Use `sup,5mCG_5hmCG` for chemistry auto-selection, or `sup`/`hac`/`fast` for no modification calling) |
+| `-m` | no | Dorado basecalling model (default: `dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2` — pinned model with CpG 5mC/5hmC calling. Use `sup,5mCG_5hmCG` for chemistry auto-selection, or `sup`/`hac`/`fast` for no modification calling) |
 | `-T` | no | Directory for intermediate files (default: next to output; deleted on exit) |
 
 ## Model selection
 
-The default is a **pinned model with CpG methylation calling enabled**:
+The default names an **exact model with CpG methylation calling built in**:
 
 ```
-dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2
+dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2
 ```
 
 Two deliberate choices, each with a cost:
 
-**Modification calling is on.** Without a modification suffix, dorado emits no `MM`/`ML`
-tags and no methylation analysis is possible downstream. Because basecalling is by far
-the most expensive step, discovering this later usually means running it again — so the
+**Modification calling is on.** Without a modification, dorado emits no `MM`/`ML` tags
+and no methylation analysis is possible downstream. Because basecalling is by far the
+most expensive step, discovering this later usually means running it again — so the
 default errs toward producing the data. Modification basecalling is somewhat slower and
-requires downloading a second model.
+downloads a second model.
 
-**The model is pinned rather than the `sup` shorthand.** `sup` resolves against each
+**An exact model is named, rather than the `sup` shorthand.** `sup` resolves against each
 pod5's own chemistry metadata, so two runs basecalled months apart can silently use
-different models; pinning makes the basecaller a fixed quantity you can cite. The cost is
+different models; naming the model keeps the basecaller a fixed quantity. The cost is
 that **chemistry is no longer auto-matched** — pod5s that are not R10.4.1 / E8.2 / 400 bps
-will be mis-called or rejected. If your data is a different chemistry, override with a
-shorthand form.
+will be mis-called or rejected. If your data is a different chemistry, use a shorthand
+form instead.
 
 ### Writing a model string
 
-Dorado's "model complex" is `<simplex model>,<modification>`. The catch:
+Dorado accepts either a **shorthand plus modifications** (`sup,5mCG_5hmCG`) or a **full
+model name** as printed by `dorado download --list`. The two are not interchangeable, and
+mixing them fails. Tested on dorado 1.3.3:
 
 | Model string | Result |
 |---|---|
-| `sup,5mCG_5hmCG` | ✅ works — dorado picks the matching modification model |
-| `dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG` | ❌ **parse error** |
-| `dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2` | ✅ works |
+| `sup,5mCG_5hmCG` | ✅ works — dorado resolves it to the full name below |
+| `dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG` | ❌ `'5mCG_5hmCG' is not a recognised model name` |
+| `dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2` | ❌ same error, for `'5mCG_5hmCG@v2'` |
+| `dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2` | the default — note the **underscore** |
 
-A bare modification name resolves only against the **shorthand**. If you pin the simplex
-model, you must pin the modification version too, or dorado fails immediately with:
-
-```
-[error] Failed to parse model complex '...sup@v5.2.0,5mCG_5hmCG'.
-        '5mCG_5hmCG' is not a recognised model name.
-```
-
-To find valid combinations, ask dorado:
+A modification written after a **comma** resolves only against the shorthand. Adding a
+version to it does not help. To name an exact model with modifications, use the full
+combined name with an **underscore**, exactly as it appears here:
 
 ```bash
 dorado download --list          # "modification models" section
 ```
 
-Entries are printed as `<simplex>_<modification>@<version>`, e.g.
-`dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2`. On the command line the same pair is
-written with a comma: `dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2`.
+Entries print as `<simplex>_<modification>@<version>`, e.g.
+`dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2` — that whole string is the model name.
+
+If a model string is wrong, dorado says so in well under a second, before any GPU work:
+
+```
+[error] Failed to parse model complex '...'. '...' is not a recognised model name.
+[error] Failed to resolve basecaller models: Invalid model argument
+```
+
+**If the default is ever rejected on your dorado version, fall back to
+`-m sup,5mCG_5hmCG`**, which is confirmed working and resolves to the same model.
 
 ### Which modification?
 
@@ -807,10 +813,10 @@ Your CONFIG file should look something like this:
 ^igv-bigwig
 
 # Dorado model for pod5 basecalling (optional)
-# Default: dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2
+# Default: dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2
 #   pinned model + CpG 5mC/5hmC calling (emits MM/ML modification tags)
 # 'sup,5mCG_5hmCG' auto-selects chemistry and keeps mod calling; 'sup' disables it
-^dorado-model dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2
+^dorado-model dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2
 ```
 The wildcard variables are assigned designated as:
 
@@ -823,7 +829,7 @@ The wildcard variables are assigned designated as:
 ^t Directories containing temporary files (auto-deleted after use)
 ^igv-bam Generate strand-split BAMs and indices for IGV visualization (flag, no value)
 ^igv-bigwig Generate coverage bigWig files for each strand-split BAM (flag, no value)
-^dorado-model Dorado basecalling model for pod5 input (default: `dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2`, a pinned model with CpG 5mC/5hmC calling); applies to all pod5 samples
+^dorado-model Dorado basecalling model for pod5 input (default: `dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2`, a pinned model with CpG 5mC/5hmC calling); applies to all pod5 samples
 
 If you want to try out alternative variables, just add another row.
 
@@ -924,7 +930,7 @@ Required arguments:
     -i    Input: pod5 directory or single pod5 file
     -o    Output BAM file
     -m    Dorado model. Accepts dorado's inline modification syntax, e.g.
-          dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2  (pinned model + CpG calls)
+          dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2  (pinned model + CpG calls)
           sup,5mCG_5hmCG                                  (auto-select + CpG calls)
           sup / hac / fast                                (no modification calls)
 
@@ -940,7 +946,7 @@ Notes:
 
 Example:
     Dorado_basecall.sh -i /absolute/path/to/pod5/Sample01/ -o data/basecalled/Sample01.bam \
-        -m dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2 -t 4
+        -m dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2 -t 4
 ```
 
 ---

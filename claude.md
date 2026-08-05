@@ -960,7 +960,7 @@ signal alignment — use this to avoid running the expensive align step twice.
 - `-p` (processes) defaults to **1** in uncalled4 — always pass `-t {threads}` from Snakemake.
 
 **Dorado model config:**
-- Default model: `dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2` — pinned exact model with CpG
+- Default model: `dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2` — pinned exact model with CpG
   5mC/5hmC calling enabled (see "CpG modification calling by default" below)
 - Override with `^dorado-model <model>` in CONFIG, or `-m` for `nanoprint preprocess`.
   `sup,5mCG_5hmCG` restores chemistry auto-selection; `sup` restores the old mod-free behaviour
@@ -1177,7 +1177,7 @@ one alone produces BAMs with no methylation data.
 **1. The default model is pinned and carries modifications.**
 
 ```
-dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2
+dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2
 ```
 
 Set in two places that must be kept in sync — `DEFAULT_DORADO_MODEL` in
@@ -1185,22 +1185,33 @@ Set in two places that must be kept in sync — `DEFAULT_DORADO_MODEL` in
 (Snakemake pod5 path). `Dorado_basecall.sh` passes `-m` to dorado verbatim, so
 dorado's inline `model,mod` syntax works without any parsing on our side.
 
-**The `@v2` on the modification is required, and this is a real trap.** A bare
-modification name resolves only against the *shorthand* model. `sup,5mCG_5hmCG`
-works; `dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG` fails at parse time with
+**Model string syntax — two forms, not interchangeable.** Dorado accepts either a
+shorthand plus modifications, or a full model name as printed by
+`dorado download --list`. Mixing them fails. All four tested on the P2i with
+dorado 1.3.3 (2026-08-05):
 
-```
-[error] Failed to parse model complex '...sup@v5.2.0,5mCG_5hmCG'.
-        '5mCG_5hmCG' is not a recognised model name.
+| Model string | Result |
+|---|---|
+| `sup,5mCG_5hmCG` | works — resolves to the full name below |
+| `dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG` | `'5mCG_5hmCG' is not a recognised model name` |
+| `dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2` | same error, for `'5mCG_5hmCG@v2'` |
+| `dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2` | the current default (underscore) |
+
+A modification after a **comma** resolves only against the shorthand, and adding a
+version does not rescue it. Naming an exact model with modifications means using the
+full combined name with an **underscore**.
+
+This cost two failed runs because the syntax was inferred from the `download --list`
+output rather than tested. The lesson is cheap to apply: a bad model string fails in
+well under a second, before any GPU work, so **run the string once before starting
+anything long**:
+
+```bash
+dorado basecaller <model-string> <one.pod5> --emit-moves > /dev/null   # Ctrl-C after it starts
 ```
 
-Pinning the simplex model means pinning the modification model too. Valid pairs
-are exactly what `dorado download --list` prints under "modification models", in
-the form `<simplex>_<mod>@<ver>` — written `<simplex>,<mod>@<ver>` on the command
-line. Confirmed on the P2i 2026-08-05 (dorado 1.3.3): `sup,5mCG_5hmCG` resolved
-to `dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2`, which is where the pinned
-default comes from. It fails in under a tenth of a second, so it is cheap to
-check — but check it before starting a multi-day run, not after.
+If the default is ever rejected on a different dorado version, `sup,5mCG_5hmCG` is the
+confirmed-working fallback and resolves to the same model.
 
 **Modification models available for `sup@v5.2.0`** (dorado 1.3.3, P2i, 2026-08-05).
 Availability is version-specific — re-check `dorado download --list` rather than
@@ -1219,7 +1230,8 @@ the simplex version, which is another reason to read the list rather than guess.
 
 **Observed cost of modification basecalling** (P2i, A100 80GB, `-p 5`, 2 pod5 files
 from a PromethION LSK114 run): 61,143 reads basecalled in 472 s with
-`sup@v5.2.0,5mCG_5hmCG@v2`. Extrapolating linearly, a 500-pod5 run is roughly
+`sup,5mCG_5hmCG` (the shorthand — this run predates the pinned default).
+Extrapolating linearly, a 500-pod5 run is roughly
 30–35 hours of GPU time — plan the `nohup`/lingering setup accordingly. The same
 run showed minimap2 peak RSS of **14.99 GB** on the human genome, confirming the
 12–16 GB figure in "map_reads: Threading and Memory" above.

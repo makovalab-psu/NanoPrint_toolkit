@@ -56,16 +56,24 @@ declare -a CONTROL_PATHS=()
 declare -a TEMP_DIRS=()
 IGV_BAM="false"
 IGV_BIGWIG="false"
-# Pinned exact model with CpG 5mC/5hmC calling enabled. The pin keeps the
-# basecaller a fixed quantity across runs (the 'sup' shorthand resolves against
-# each pod5's chemistry metadata, so it can drift between runs); the
-# ,5mCG_5hmCG suffix is what makes dorado emit MM/ML tags at all, without which
-# no methylation analysis is possible and the expensive basecalling step has to
-# be repeated. A pod5 from a different chemistry will now be mis-called or
-# rejected rather than auto-matched — override with '^dorado-model sup,5mCG_5hmCG'
-# for auto-selection, or '^dorado-model sup' for the old mod-free behaviour.
+# Exact model with CpG 5mC/5hmC calling built in, named as `dorado download --list`
+# prints it. The built-in modification is what makes dorado emit MM/ML tags at all;
+# without them no methylation analysis is possible and the expensive basecalling step
+# has to be repeated. Naming an exact model rather than the 'sup' shorthand keeps the
+# basecaller fixed across runs, at the cost that a pod5 from a different chemistry is
+# mis-called or rejected rather than auto-matched.
+#
+# NOTE THE UNDERSCORE before 5mCG_5hmCG. A modification after a COMMA resolves only
+# against the shorthand — 'sup,5mCG_5hmCG' works, but both
+# '...sup@v5.2.0,5mCG_5hmCG' and '...sup@v5.2.0,5mCG_5hmCG@v2' are rejected with
+# "is not a recognised model name" (tested, dorado 1.3.3, 2026-08-05). Do not rewrite
+# this string from the dorado docs without running it.
+#
+# Override with '^dorado-model sup,5mCG_5hmCG' for chemistry auto-selection (also the
+# fallback if the default is ever rejected), or '^dorado-model sup' for the old
+# mod-free behaviour.
 # KEEP IN SYNC with DEFAULT_DORADO_MODEL in bin/nanoprint.
-DORADO_MODEL="dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2"
+DORADO_MODEL="dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2"
 
 # Function to strip file extension
 strip_ext() {

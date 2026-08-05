@@ -4,7 +4,8 @@
 # Produces a BAM with --emit-moves so Uncalled4 can use the move table.
 #
 # The model string is passed to dorado verbatim, so it may carry dorado's inline
-# modification syntax (e.g. sup,5mCG_5hmCG). Callers default to a model with CpG
+# modification syntax (e.g. sup,5mCG_5hmCG) or a full combined model name. Callers
+# default to a model with CpG
 # 5mC/5hmC calling enabled — see DEFAULT_DORADO_MODEL in bin/nanoprint and
 # DORADO_MODEL in CONFIG.sh. A model with no modification suffix produces a BAM
 # with no MM/ML tags, which cannot be recovered without basecalling again.
@@ -24,8 +25,8 @@ Required arguments:
     -i    Input: pod5 directory or single pod5 file
     -o    Output BAM file (unsorted; sorted downstream by map_reads)
     -m    Dorado model. Accepts dorado's inline modification syntax, e.g.
-          dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2  (pinned model + CpG calls)
-          sup,5mCG_5hmCG                                  (auto-select + CpG calls)
+          dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2  (exact model, CpG calls; note the underscore)
+          sup,5mCG_5hmCG                                    (auto-select + CpG calls)
           sup / hac / fast                                (no modification calls)
 
 Optional arguments:
@@ -39,7 +40,7 @@ Notes:
 
 Example:
     $(basename "$0") -i raw_data/Sample01/ -o data/basecalled/Sample01.bam \\
-        -m dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2 -t 4
+        -m dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2 -t 4
 EOF
     exit 1
 }

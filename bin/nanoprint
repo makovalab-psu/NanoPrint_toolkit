@@ -9,39 +9,42 @@ SCRIPTS="$TOOLKIT_ROOT/workflow/scripts"
 # ---------------------------------------------------------------------------
 # Default Dorado model
 #
-# Pinned to an exact model, with CpG modification calling switched on, because
-# both properties have to be true for downstream analyses to be comparable:
+# An exact model with CpG 5mC/5hmC calling built in, written as the full combined
+# name that `dorado download --list` prints under "modification models".
 #
-#   dna_r10.4.1_e8.2_400bps_sup@v5.2.0   exact model, not the 'sup' shorthand.
-#       'sup' resolves against each pod5's own chemistry metadata, so two runs
-#       basecalled months apart can silently use different models. Pinning makes
-#       the basecaller a fixed quantity across runs. The cost is that a pod5 from
-#       another chemistry or sampling rate is now basecalled by the wrong model
-#       or rejected outright, instead of being auto-matched. Override with
-#       -m sup,5mCG_5hmCG to get auto-selection back.
-#   ,5mCG_5hmCG@v2                       CpG-context 5mC + 5hmC calling.
-#       Dorado's inline modification syntax. Without it no MM/ML tags are
-#       produced at all and no methylation analysis is possible downstream —
-#       and since basecalling is the expensive step, a mod-free run usually
-#       means re-running it. Matches the makova_fire FIBER-Seq pipeline, which
-#       uses sup,5mCG_5hmCG,6mA; comparing datasets called by different
-#       modification models measures the models, not the samples.
-#       Use -m sup for the old modification-free behaviour.
+# Why modifications at all: without them dorado emits no MM/ML tags, no methylation
+# analysis is possible downstream, and since basecalling is the expensive step,
+# finding out later means running it again. `5mCG_5hmCG` is CpG-context (not the
+# all-context `5mC_5hmC`) and matches the makova_fire FIBER-Seq pipeline
+# (sup,5mCG_5hmCG,6mA) — comparing datasets basecalled with different modification
+# models measures the models, not the samples.
 #
-#       THE @v2 IS REQUIRED HERE. A bare modification name resolves only against
-#       the shorthand: `sup,5mCG_5hmCG` works, but
-#       `dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG` fails at parse time with
-#       "'5mCG_5hmCG' is not a recognised model name" (dorado 1.3.3). Pinning the
-#       simplex model means pinning the modification model too. The valid pairs
-#       are whatever `dorado download --list` shows under "modification models",
-#       printed as <simplex>_<mod>@<ver> — the same thing written <simplex>,<mod>@<ver>
-#       on the command line. Verified 2026-08-05: dorado resolved sup,5mCG_5hmCG
-#       to dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2 on this data.
+# Why the exact name rather than the 'sup' shorthand: 'sup' resolves against each
+# pod5's own chemistry metadata, so two runs basecalled months apart can silently
+# use different models. The cost is that a pod5 from another chemistry or sampling
+# rate is now mis-called or rejected instead of auto-matched.
+#
+# MODEL STRING SYNTAX — tested on the P2i, dorado 1.3.3, 2026-08-05.
+# Do not "fix" this string from the dorado docs without running it; two plausible
+# forms inferred from `dorado download --list` both failed:
+#
+#   sup,5mCG_5hmCG                                    WORKS (resolves to the name below)
+#   dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG     FAILS: "'5mCG_5hmCG' is not a
+#                                                     recognised model name"
+#   dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2  FAILS: same, for '5mCG_5hmCG@v2'
+#   dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2  the default below (underscore,
+#                                                     the full combined model name)
+#
+# A bare modification after a comma resolves only against the shorthand. If the
+# default is ever rejected at parse time (the error appears in under a second, before
+# any GPU work), fall back to -m sup,5mCG_5hmCG, which is confirmed working.
+#
+# Use -m sup for the old modification-free behaviour.
 #
 # KEEP IN SYNC with DORADO_MODEL in workflow/scripts/CONFIG.sh, which is the
 # same default for the Snakemake (pod5-input) path.
 # ---------------------------------------------------------------------------
-DEFAULT_DORADO_MODEL="dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2"
+DEFAULT_DORADO_MODEL="dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2"
 
 # ---------------------------------------------------------------------------
 # usage helpers
@@ -88,17 +91,23 @@ Required arguments:
 
 Optional arguments:
     -m    Dorado basecalling model
-          Default: dna_r10.4.1_e8.2_400bps_sup@v5.2.0,5mCG_5hmCG@v2
-            An exact pinned model with CpG 5mC/5hmC calling switched on, so
-            output BAMs carry MM/ML modification tags and runs stay comparable
-            to each other. Because the model is pinned rather than the 'sup'
-            shorthand, pod5s from a different chemistry are NOT auto-matched and
-            will be mis-called or rejected — override if your data is not
+          Default: dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2
+            An exact model with CpG 5mC/5hmC calling built in, so output BAMs
+            carry MM/ML modification tags and runs stay comparable to each other.
+            Because it names a specific model rather than the 'sup' shorthand,
+            pod5s from a different chemistry are NOT auto-matched and will be
+            mis-called or rejected — override if your data is not
             R10.4.1 / E8.2 / 400 bps.
-          Examples:
+          Alternatives:
             sup,5mCG_5hmCG   auto-select chemistry, keep modification calling
             sup              auto-select chemistry, no modification calling
             hac, fast        faster/less accurate, no modification calling
+          Note the underscore in the default. A modification after a COMMA only
+          resolves against the shorthand: 'sup,5mCG_5hmCG' works, but
+          'dna_..._sup@v5.2.0,5mCG_5hmCG' and '...,5mCG_5hmCG@v2' are both
+          rejected with "is not a recognised model name" (dorado 1.3.3).
+          Valid full names are what 'dorado download --list' prints.
+          If the default is ever rejected, use -m sup,5mCG_5hmCG.
     -T    Directory for intermediate files (default: <output_dir>/tmp_nanoprint_<PID>)
           Deleted on exit regardless of success or failure. Intermediates NOT
           persisted via --keep-* live here and are lost if a later step fails.
