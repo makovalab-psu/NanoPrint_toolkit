@@ -1,6 +1,6 @@
 # Phase 3b: Signal Reactivity Calculation
 # Computes treatment_mean_sq - control_mean_sq per chromosome, where mean_sq
-# is mean(dtw.model_diff^2) = sum(dtw.model_diff^2)/N (pA^2, column 10 of
+# is mean(dtw.model_diff^2) = sum(dtw.model_diff^2)/N (normalized^2, column 10 of
 # perbase_signal files). Uses Calculate_reactivity.sh with -f 10 to select
 # the mean squared deviation column from the 10-column perbase_signal format.
 # Output paths use 'signal_reactivity' to avoid collisions with perbase_error reactivity.
@@ -33,6 +33,12 @@ rule calculate_signal_reactivity:
             "signal_reactivity",
             "data/signal_reactivity/{genome}/{sample}_{strand}_{chr}.txt.gz"
         )
+    params:
+        # See phase3_reactivity.smk: per-strand coverage threshold, applied to both
+        # treatment and control. Same config key so the two reactivity tracks are
+        # always filtered identically — they are subtracted position-by-position
+        # downstream, and a mismatch would silently compare different position sets.
+        cov=config.get("reactivity_cov_threshold", 10)
     log:
         "logs/signal_reactivity/{genome}/{sample}_{strand}_{chr}.log"
     benchmark:
@@ -46,5 +52,6 @@ rule calculate_signal_reactivity:
             -m {input.control} \
             -o {output.reactivity} \
             -f 10 \
+            -c {params.cov} \
             2>&1 | tee {log}
         """

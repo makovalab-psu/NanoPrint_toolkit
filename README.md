@@ -308,7 +308,7 @@ chr19_MATERNAL	10	A	67	0.014925	0.010000	0.025119	0.001585	0.050119
 ## Per-base Signal Deviation Files (pod5 mode only)
 
 ### Description
-Per-base pore model signal deviation computed from Uncalled4 DTW alignment. Available only when the raw input is pod5 files. Reports the mean `dtw.model_diff` (model current − observed current, in pA) across all reads at each genomic position, along with quantiles that capture per-read variability. Positive values indicate the observed ion current is lower than the pore model expectation.
+Per-base pore model signal deviation computed from Uncalled4 DTW alignment. Available only when the raw input is pod5 files. Reports the mean `dtw.model_diff` (observed current − model current, in normalized units — not pA) across all reads at each genomic position, along with quantiles that capture per-read variability. Positive values indicate the observed ion current is higher than the pore model expectation.
 
 ### Format
 Tab-delimited, gzipped, no header (10 columns):
@@ -318,12 +318,12 @@ Tab-delimited, gzipped, no header (10 columns):
 | 2 | position | Genomic position (1-based) |
 | 3 | nucleotide | Reference nucleotide (A, C, G, T) |
 | 4 | coverage | Number of reads contributing to this position |
-| 5 | mean_deviation | Mean dtw.model_diff across reads (pA) |
-| 6 | q25 | 0.25 quantile of per-read dtw.model_diff (lower 50% CI bound, pA) |
-| 7 | q75 | 0.75 quantile of per-read dtw.model_diff (upper 50% CI bound, pA) |
-| 8 | q025 | 0.025 quantile of per-read dtw.model_diff (lower 95% CI bound, pA) |
-| 9 | q975 | 0.975 quantile of per-read dtw.model_diff (upper 95% CI bound, pA) |
-| 10 | mean_sq | Mean squared deviation — mean(dtw.model_diff²) = sum(dtw.model_diff²)/N (pA²) |
+| 5 | mean_deviation | Mean dtw.model_diff across reads (normalized units) |
+| 6 | q25 | 0.25 quantile of per-read dtw.model_diff (lower 50% CI bound, normalized) |
+| 7 | q75 | 0.75 quantile of per-read dtw.model_diff (upper 50% CI bound, normalized) |
+| 8 | q025 | 0.025 quantile of per-read dtw.model_diff (lower 95% CI bound, normalized) |
+| 9 | q975 | 0.975 quantile of per-read dtw.model_diff (upper 95% CI bound, normalized) |
+| 10 | mean_sq | Mean squared deviation — mean(dtw.model_diff²) = sum(dtw.model_diff²)/N (normalized²) |
 
 ### Location
 `data/perbase_signal/{genome}/{sample}_{strand}.txt.gz`
@@ -335,7 +335,7 @@ Tab-delimited, gzipped, no header (10 columns):
 ### Description
 Signal reactivity calculated as the difference in mean squared pore model signal deviation between treatment and control at each position:
 
-> signal_reactivity = mean(dtw.model_diff²)_treatment − mean(dtw.model_diff²)_control  (pA²)
+> signal_reactivity = mean(dtw.model_diff²)_treatment − mean(dtw.model_diff²)_control  (normalized²)
 
 Mean squared deviation (column 10 of perbase_signal files) captures the magnitude of signal perturbation regardless of sign, making it a more sensitive metric for detecting chemical modification-induced changes in ion current. Positive values indicate greater signal variance in the treatment relative to control.
 
@@ -1433,7 +1433,7 @@ Example:
 
 ## 2b. perbase_signal_deviation (pod5 mode)
 
-**Description:** Compute per-base pore model signal deviation from an Uncalled4 DTW TSV. Groups per-read DTW measurements by reference position and computes multiple statistics from `dtw.model_diff` (model − observed current, pA). The 10-column output includes mean deviation, quantiles, and mean squared deviation (pA²). The mean squared deviation (column 10) is used as the signal metric for Phase 3b reactivity calculation.
+**Description:** Compute per-base pore model signal deviation from an Uncalled4 DTW TSV. Groups per-read DTW measurements by reference position and computes multiple statistics from `dtw.model_diff` (observed − model current, normalized units). The 10-column output includes mean deviation, quantiles, and mean squared deviation (normalized²). The mean squared deviation (column 10) is used as the signal metric for Phase 3b reactivity calculation.
 
 **Script:** `workflow/scripts/perbase_signal_deviation.py`
 
@@ -1473,15 +1473,15 @@ Output format (tab-delimited, gzipped):
     Column 2:  Position (1-based)
     Column 3:  Nucleotide (from dtw.base; pysam FASTA as fallback)
     Column 4:  Coverage (reads at this position)
-    Column 5:  Mean signal deviation (mean dtw.model_diff, pA)
-    Column 6:  Q25  — 0.25 quantile of dtw.model_diff (lower 50% CI bound, pA)
-    Column 7:  Q75  — 0.75 quantile of dtw.model_diff (upper 50% CI bound, pA)
-    Column 8:  Q025 — 0.025 quantile of dtw.model_diff (lower 95% CI bound, pA)
-    Column 9:  Q975 — 0.975 quantile of dtw.model_diff (upper 95% CI bound, pA)
-    Column 10: Mean squared deviation — mean(dtw.model_diff^2) = sum(dtw.model_diff^2)/N (pA^2)
+    Column 5:  Mean signal deviation (mean dtw.model_diff, normalized units)
+    Column 6:  Q25  — 0.25 quantile of dtw.model_diff (lower 50% CI bound, normalized)
+    Column 7:  Q75  — 0.75 quantile of dtw.model_diff (upper 50% CI bound, normalized)
+    Column 8:  Q025 — 0.025 quantile of dtw.model_diff (lower 95% CI bound, normalized)
+    Column 9:  Q975 — 0.975 quantile of dtw.model_diff (upper 95% CI bound, normalized)
+    Column 10: Mean squared deviation — mean(dtw.model_diff^2) = sum(dtw.model_diff^2)/N (normalized^2)
 
 Notes:
-    - dtw.model_diff = model - observed (positive = observed current lower than expected)
+    - dtw.model_diff = observed - model (positive = observed current higher than expected)
     - Positions where DTW failed (marked '*' in TSV) are excluded (read as NaN)
     - Handles uncalled4 version differences in column naming automatically
 
@@ -2548,15 +2548,26 @@ The per-base signal deviation files have 10 columns. Phase 3b uses `Calculate_re
 | Non-zero exit on partial DTW failure | Script aborts even though most reads succeeded | `|| true` in scripts + non-empty output check |
 | `*` sentinel for DTW failures | TSV column has `*` instead of a number | `na_values=["*"]` in `pd.read_csv` |
 | Missing newlines between TSV rows | Row with too many fields | `on_bad_lines="warn"` in `pd.read_csv` |
-| pod5/pyarrow deadlock | Hangs indefinitely inside C extension | Pin `pyarrow>=14,<20` (`lib-pod5==0.3.10` does not exist on PyPI; any recent pod5 version is fine) |
+| pod5/pyarrow deadlock | Hangs indefinitely inside C extension | **No longer pinnable** — current `pod5` requires `pyarrow>=20`, so `pyarrow<20` will not resolve (js4026, Aug 2026). Whether the deadlock still reproduces is untested; see `environment.yml`. |
 | setuptools incompatibility | `pip install uncalled4` build fails | `pip install setuptools==69.5.1` first |
 | `-p` processes defaults to 1 | Single-threaded despite Snakemake allocating 8 threads | Always pass `-p "$THREADS"` explicitly |
 
 ### dtw.model_diff Sign Convention
 
-`dtw.model_diff` = **model current − observed current** (pA). This is the official uncalled4 definition (predicted minus actual):
-- **Positive** value → observed ion current is **lower** than the pore model expects
-- **Negative** value → observed current is higher than expected
+`dtw.model_diff` = **observed current − model current**, in **normalized units, not pA**.
+The source is unambiguous — `tracks.py:213` computes `np.array(self.current) - self.seq.current`,
+observed minus predicted:
+- **Positive** value → observed ion current is **higher** than the pore model expects
+- **Negative** value → observed current is lower than expected
+
+Earlier revisions of this file stated the opposite ("model − observed", in pA) and called it the
+official definition. Both halves were wrong, and the claim had been copied into the rule
+docstrings and script help text; corrected throughout in js4026 (Aug 2026).
+
+On units: signal is normalized to the pore model's reference distribution before DTW, so
+`dtw.current` and `seq.current` live in the same normalized space and their difference is
+unitless. Multiply by the model's `pa_stdv` (~23.1 pA for R10.4.1) to get picoamps — a
+`mean_dev` of 0.6 is roughly 14 pA, not 0.6 pA.
 
 This sign is consistent across treatment and control samples, so the signal reactivity calculation (treatment_deviation − control_deviation) correctly captures chemical modification-induced changes.
 

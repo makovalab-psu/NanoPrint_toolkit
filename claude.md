@@ -383,6 +383,38 @@ END {
 - Memory: ~3-5MB for 80,000 keys (trivial)
 - Runtime: seconds/minutes vs potentially hours
 
+### Reactivity coverage threshold is PER STRAND (js4026, Aug 2026)
+
+`Calculate_reactivity.sh` defaults to `COV_THRESHOLD=10` and drops any position where
+treatment or control is below it:
+
+```awk
+if (cov_t >= cov && cov_c >= cov) { reactivity = err_t - err_c; print ... }
+```
+
+The coverage column it tests is **per strand** — `perbase_error.sh` strand-filters the BAM
+before `mpileup` — so a sample at Nx total depth is roughly N/2x here. A 20x sample sits
+right at the cut, and a 10x sample loses nearly everything. Long reads make coverage
+strongly autocorrelated along the genome, so it fails in blocks rather than smoothly:
+some chromosomes/strands keep a handful of positions and others keep none, in which case
+line 145 writes a valid 0-row gzip.
+
+Two consequences, the second easy to miss:
+- Files that come out **empty** at low depth are the visible symptom.
+- Files that come out **non-empty** at moderate depth are silently truncated to the
+  positions that happened to clear the cut. That subset is coverage-biased, and it biases
+  toward looking cleaner than the data is, because the discarded positions are the noisy
+  low-coverage ones.
+
+Now configurable: `config.get("reactivity_cov_threshold", 10)` in both `calculate_reactivity`
+and `calculate_signal_reactivity` (same key for both — they are subtracted position-by-position
+downstream, so filtering them differently would compare mismatched position sets). Default is
+unchanged. Pass `--config reactivity_cov_threshold=0` for any run that needs to characterise
+behaviour AT low coverage; filter afterwards in R, where the threshold can be varied instead
+of baked in.
+
+Note `perbase_error` and `perbase_signal` apply no coverage filter — only reactivity does.
+
 ### Special Marker Values in Reactivity Files
 
 Phase 3 (`Calculate_reactivity.sh`) outputs special marker values for positions missing data:
@@ -973,11 +1005,24 @@ pip install uncalled4
 pip install "pod5" "pyarrow>=14,<20"
 ```
 
-**CRITICAL — pod5/pyarrow deadlock (js4007, 2026-03-25):**
-`lib-pod5 >=0.3.33` + `pyarrow >=20` deadlocks inside uncalled4's C extension during POD5 signal
-reading. Hangs indefinitely with no error message. Fix: pin `pyarrow<20`.
-NOTE: `lib-pod5==0.3.10` does not exist on PyPI (only 0.3.35, 0.3.36, 0.3.39 are available).
-Pinning `pyarrow<20` is sufficient regardless of which pod5 version is installed.
+**pod5/pyarrow deadlock — the `pyarrow<20` pin is no longer satisfiable (js4007, 2026-03-25;
+revisited js4026, 2026-08-24):**
+`lib-pod5 >=0.3.33` + `pyarrow >=20` deadlocked inside uncalled4's C extension during POD5
+signal reading. Hangs indefinitely — no error message, no crash, no exit.
+
+The recorded fix was to pin `pyarrow<20`. **That fix no longer applies.** `lib-pod5==0.3.10`
+is not on PyPI (only 0.3.35, 0.3.36, 0.3.39), and current `pod5` requires `pyarrow >=20`, so
+`pip install "pyarrow>=14,<20"` alongside `pod5` cannot resolve. A clean env built for js4026
+lands on pyarrow 22. The earlier claim here that "pinning `pyarrow<20` is sufficient regardless
+of which pod5 version is installed" is now false and has been removed.
+
+Whether the deadlock still reproduces on current versions is **untested** — it was never hit in
+js4026, which reads DTW tags out of existing Uncalled4 BAMs (`uncalled4 convert`) and never
+opens a pod5. The next run that actually reads POD5 signal is the test. Watch for uncalled4
+sitting near 0% CPU with a stalled output file; per the diagnosis notes below, near-zero CPU on
+the *main* uncalled4 process is normal (workers do the DTW), so check the child processes and
+whether the output BAM is still growing before concluding it is hung. If it completes normally,
+delete this note and the one in `environment.yml`.
 
 **Dorado — directory input requires `--recursive` (js4016, 2026-06-23):**
 `dorado basecaller <model> <dir>` does NOT recurse into subdirectories by default. Sequencer
@@ -1050,6 +1095,39 @@ samtools index "$OUTPUT"
 The read count check (`samtools view -c`) must run BEFORE sorting (on the raw uncalled4 output)
 since sorting doesn't change read count but the temp mv would clobber the original.
 Note: this sorting step is already handled inside `Uncalled4_align.sh` — no Snakemake rule change needed.
+
+**`uncalled4 convert` needs `--ref`; without it, it uses the path baked into the
+BAM at alignment time (js4026, Aug 2026):**
+`uncalled4 convert` has to load the reference to look up the pore model k-mer behind
+`dtw.model_diff`. If `--ref` is not given it falls back to the reference path
+recorded in the BAM header by `uncalled4 align`. That path is only meaningful on the
+machine and working directory where the alignment ran. Converting a BAM produced by an
+earlier run dies immediately:
+
+```
+OSError: Reference index "/data/resources/genomes/hg002v1.1_MATERNAL_chrY_chrM.fa" not found.
+Please specify '--ref-index [ref.fasta]'
+```
+
+**The error message names the wrong flag.** It says `--ref-index`, which is uncalled4's
+internal config key; the CLI option for `uncalled4 convert` is `--ref`. Passing
+`--ref-index` verbatim gets `error: unrecognized arguments`. Check `uncalled4 convert -h`
+rather than trusting the remedy in the traceback — `--ref` is documented there as
+"Reference FASTA file, must match --bam-in reference".
+
+`Uncalled4_convert_tsv.sh` now takes `-g <ref.fa>` and passes it as `--ref`, and
+`uncalled4_convert_tsv` supplies `resources/genomes/{genome}.fa`. A subset FASTA works as
+long as it contains every contig the reads map to and matches the BAM header.
+
+**This failed silently for a whole 3,600-job run.** `Uncalled4_convert_tsv.sh` ran
+`uncalled4 convert ... || true` (needed, because convert exits non-zero on partial DTW
+failures) and then only *warned* about an empty TSV, on the theory that a sample may
+legitimately have no reads on a strand. So every rule downstream propagated an empty
+file and Snakemake reported success. The script now distinguishes the two cases: an
+empty TSV is an error when the strand-filtered BAM had reads, and a warning only when it
+had none. When a script swallows an exit status, the emptiness check is the only thing
+standing between a hard failure and a clean-looking run — make it compare against what
+went in, not just against zero.
 
 **Uncalled4 known issues (from js4007):**
 - **Non-zero exit on partial failure:** `uncalled4 align` returns non-zero when any reads fail

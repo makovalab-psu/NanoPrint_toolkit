@@ -33,10 +33,27 @@ def has_pod5(raw_sample):
     return get_pod5_dir(raw_sample) is not None
 
 
+def pod5_input(raw_sample):
+    """Pod5 input for a rule, or no input at all when the sample is not pod5.
+
+    Snakemake instantiates the job that produces a file even when that file
+    already exists, purely to decide whether it is up to date — and doing so
+    evaluates the input functions. Returning None there raises
+    "Function did not return str or iterable of str. Encountered: [None]"
+    during DAG construction, before the up-to-date check can happen. That
+    breaks any workflow where data/uncalled4/ or data/basecalled/ was supplied
+    from outside the pipeline rather than produced by it.
+
+    An empty list means "this rule has no pod5 input", which is correct for a
+    non-pod5 sample: the rule is not applicable and must never run.
+    """
+    return get_pod5_dir(raw_sample) or []
+
+
 rule dorado_basecall:
     """Basecall pod5 files with Dorado (emits move tables for Uncalled4)."""
     input:
-        pod5=lambda wildcards: get_pod5_dir(wildcards.raw_sample)
+        pod5=lambda wildcards: pod5_input(wildcards.raw_sample)
     output:
         bam="data/basecalled/{raw_sample}.bam"
     params:
@@ -69,7 +86,7 @@ rule uncalled4_align:
     """
     input:
         bam="data/filtered_alignments/{genome}/{raw_sample}.bam",
-        pod5=lambda wildcards: get_pod5_dir(wildcards.raw_sample),
+        pod5=lambda wildcards: pod5_input(wildcards.raw_sample),
         genome="resources/genomes/{genome}.fa"
     output:
         bam="data/uncalled4/{genome}/{raw_sample}.bam",
@@ -95,11 +112,18 @@ rule uncalled4_convert_tsv:
     """Convert Uncalled4 BAM to a strand-specific DTW TSV using uncalled4 convert.
     Avoids re-running signal alignment — all DTW data is already in the BAM tags.
     Pre-filters to one strand with samtools view before converting.
-    dtw.model_diff = model - observed current (pA), used by perbase_signal_deviation.py.
+    The reference is passed explicitly as --ref (via -g to the wrapper script).
+    uncalled4 needs it for the pore model k-mer behind dtw.model_diff, and its
+    fallback is the path recorded in the BAM header at alignment time, which does
+    not resolve for a BAM produced by a different run or on a different machine.
+    Note the flag is --ref, not the --ref-index named in uncalled4's own error.
+    dtw.model_diff = observed - model current, in normalized (not pA) units;
+    consumed by perbase_signal_deviation.py.
     """
     input:
         bam="data/uncalled4/{genome}/{raw_sample}.bam",
-        bai="data/uncalled4/{genome}/{raw_sample}.bam.bai"
+        bai="data/uncalled4/{genome}/{raw_sample}.bam.bai",
+        genome="resources/genomes/{genome}.fa"
     output:
         tsv="data/uncalled4_tsv/{genome}/{raw_sample}_{strand}.tsv"
     log:
@@ -115,6 +139,7 @@ rule uncalled4_convert_tsv:
             -i {input.bam} \
             -o {output.tsv} \
             -s {wildcards.strand} \
+            -g {input.genome} \
             -t {threads} \
             2>&1 | tee {log}
         """

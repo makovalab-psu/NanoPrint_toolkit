@@ -31,13 +31,22 @@ dependencies:
   # dorado: download binary from https://github.com/nanoporetech/dorado/releases
   #   (GPU basecaller; not on conda)
   #
-  # After conda env create, install uncalled4 and pinned pod5 via pip:
+  # After conda env create, install uncalled4 and pod5 via pip:
   #   pip install setuptools==69.5.1        # required — newer setuptools breaks uncalled4 build
   #   pip install uncalled4
-  #   pip install "pod5==0.3.10" "lib-pod5==0.3.10" "pyarrow>=14,<15"
+  #   pip install pod5
   #
-  # CRITICAL: lib-pod5 >=0.3.33 + pyarrow >=20 deadlocks during uncalled4 signal reading
-  # (js4007, 2026-03-25). Pin pod5==0.3.10 + pyarrow<15 to avoid indefinite hang.
+  # KNOWN HAZARD, currently unpinnable: in js4007 (2026-03-25) lib-pod5 >=0.3.33 with
+  # pyarrow >=20 deadlocked inside uncalled4's C extension while reading POD5 signal —
+  # an indefinite hang, no error message, no crash.
+  # The old remedy pinned pod5==0.3.10 + pyarrow<15. That no longer installs: lib-pod5
+  # 0.3.10 is not on PyPI, and current pod5 requires pyarrow >=20, so the pin is not
+  # satisfiable (js4026, 2026-08-24 — nanoprint2 resolves to pyarrow 22).
+  # Whether the deadlock still reproduces on current versions is UNTESTED. On the first
+  # pod5 run in a fresh env, watch for uncalled4 sitting near 0% CPU producing no output;
+  # if it hangs that way, this is the cause. If it runs clean, delete this note.
+  # Only POD5 reading is affected — `uncalled4 convert` on an existing Uncalled4 BAM
+  # reads DTW tags and never opens a pod5.
 
   # R and packages
   - r-base

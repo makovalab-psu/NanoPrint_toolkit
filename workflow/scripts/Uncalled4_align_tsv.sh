@@ -2,7 +2,8 @@
 
 # Uncalled4_align_tsv.sh - Strand-specific Uncalled4 DTW alignment with TSV output
 # Pre-filters the input BAM to one strand, then runs Uncalled4 with --tsv-out.
-# The TSV contains dtw.model_diff (model - observed pore model current per base),
+# The TSV contains dtw.model_diff (observed - model pore model current per base,
+# in normalized units),
 # which perbase_signal_deviation.py aggregates into a per-position signal deviation file.
 #
 # Usage: Uncalled4_align_tsv.sh -i <filtered.bam> -p <pod5_dir> -g <genome.fa> -o <out.tsv> -s <for|rev> [-t <threads>]
@@ -37,7 +38,8 @@ TSV columns requested from Uncalled4:
     dtw.current_sd    Signal current standard deviation
     dtw.start         Signal sample start index in raw trace
     dtw.length        Number of signal samples spanning this position
-    dtw.model_diff    Model current - observed current (pA); positive = observed < expected
+    dtw.model_diff    Observed - model current, normalized units (NOT pA);
+                      positive = observed current higher than the pore model expects
     dtw.base          Binarized reference base (used as nucleotide; may be integer-encoded)
 
 Example:

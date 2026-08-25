@@ -11,8 +11,11 @@ Per js4004/workflow/scripts/parse_uncalled4_output.py:
   - Column names may contain dots (e.g. "dtw.model_diff") — normalize to underscores
   - The chromosome column may be named "ref", "seq_name", or "chr"
   - The position column may be named "pos", "seq_pos", or "ref_pos"
-  - dtw_model_diff = model current - observed current (pA); per official uncalled4 docs,
-    this is predicted MINUS observed (positive = observed current lower than pore model)
+  - dtw_model_diff = observed current - model current, in NORMALIZED units, not pA.
+    uncalled4 computes `np.array(self.current) - self.seq.current` (tracks.py:213), i.e.
+    observed MINUS predicted, so positive = observed current HIGHER than the pore model.
+    Both terms live in the normalized space the signal was scaled into before DTW, so the
+    difference is unitless; multiply by the model's pa_stdv (~23.1 pA for R10.4.1) for pA.
 
 Nucleotide source (in priority order):
   1. dtw.base column from uncalled4 TSV (if present and not all-NaN)
@@ -25,12 +28,12 @@ Output format (tab-delimited, gzipped):
     2. Position (1-based)
     3. Nucleotide
     4. Coverage (reads contributing to this position)
-    5. Mean signal deviation (mean dtw.model_diff, pA)
-    6. Q25 — 0.25 quantile of dtw.model_diff (lower 50% CI bound, pA)
-    7. Q75 — 0.75 quantile of dtw.model_diff (upper 50% CI bound, pA)
-    8. Q025 — 0.025 quantile of dtw.model_diff (lower 95% CI bound, pA)
-    9. Q975 — 0.975 quantile of dtw.model_diff (upper 95% CI bound, pA)
-   10. Mean squared deviation — mean(dtw.model_diff^2) = sum(dtw.model_diff^2) / N (pA^2)
+    5. Mean signal deviation (mean dtw.model_diff, normalized units)
+    6. Q25 — 0.25 quantile of dtw.model_diff (lower 50% CI bound, normalized)
+    7. Q75 — 0.75 quantile of dtw.model_diff (upper 50% CI bound, normalized)
+    8. Q025 — 0.025 quantile of dtw.model_diff (lower 95% CI bound, normalized)
+    9. Q975 — 0.975 quantile of dtw.model_diff (upper 95% CI bound, normalized)
+   10. Mean squared deviation — mean(dtw.model_diff^2) = sum(dtw.model_diff^2) / N (normalized^2)
 
 Usage:
     perbase_signal_deviation.py -i <dtw.tsv> -g <genome.fa> -o <output.txt.gz>
@@ -163,10 +166,20 @@ def main():
         try:
             import pysam
             fasta = pysam.FastaFile(args.genome)
-        except ImportError:
+        except ImportError as exc:
+            # Report the real exception. "import pysam" raises ImportError both when
+            # pysam is absent and when it is present but its C extension cannot load
+            # a shared library — the second case looks identical to the first, and
+            # collapsing them into "not installed" sends you chasing the wrong bug
+            # (notably when a submit node imports it fine and a compute node does not).
             sys.exit(
-                "Error: dtw.base not available and pysam not installed. "
-                "Install with: conda install -c bioconda pysam"
+                f"Error: could not import pysam or open the reference.\n"
+                f"  {type(exc).__name__}: {exc}\n"
+                f"  python:  {sys.executable}\n"
+                f"If the message names a missing .so, pysam is installed but its\n"
+                f"C extension cannot load here — check the environment on the node\n"
+                f"actually running the job, not the submit host.\n"
+                f"If pysam is genuinely absent: pip install pysam"
             )
 
     # Group by (chromosome, position) — positions in TSV are 0-based per uncalled4 convention
