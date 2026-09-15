@@ -59,6 +59,8 @@ Subcommands:
                   Uncalled4 pore-model signal alignment. Produces a BAM ready
                   to transfer to a CPU-only cluster (e.g. ROAR) for the
                   remaining NanoPrint pipeline steps.
+    demux         Split a barcoded BAM (from preprocess -k <kit>) into per-sample
+                  BAMs using a barcode -> sample sheet.
 
 Run '$(basename "$0") <subcommand> -h' for subcommand-specific help.
 
@@ -70,7 +72,7 @@ EOF
 
 usage_preprocess() {
     cat << EOF
-Usage: $(basename "$0") preprocess -i <pod5_path> -g <genome.fa> -o <output.bam> -p <threads> [-m <model>] [-T <tmp_dir>] [--keep-basecalled] [--keep-aligned] [--keep-filtered]
+Usage: $(basename "$0") preprocess -i <pod5_path> -g <genome.fa> -o <output.bam> -p <threads> [-m <model>] [-k <kit>] [-T <tmp_dir>] [--keep-basecalled] [--keep-aligned] [--keep-filtered]
 
 Run all GPU-intensive preprocessing steps to produce an Uncalled4 BAM:
 
@@ -108,6 +110,13 @@ Optional arguments:
           rejected with "is not a recognised model name" (dorado 1.3.3).
           Valid full names are what 'dorado download --list' prints.
           If the default is ever rejected, use -m sup,5mCG_5hmCG.
+          Bacteria (js4022): -m 'sup@v5.2.0,4mC_5mC,6mA' (all-context 4mC/5mC + 6mA;
+          tested on dorado 1.3.2).
+    -k    Barcoding kit, e.g. SQK-RBK114-24. Dorado classifies barcodes during
+          basecalling (--kit-name <kit> --no-trim): all barcodes stay in the one
+          output BAM, each read tagged BC:Z:<kit>_barcodeNN (unclassified reads have
+          no BC tag), and reads are NOT trimmed so sequence, move table and signal
+          stay consistent for Uncalled4. Split afterwards with 'nanoprint demux'.
     -T    Directory for intermediate files (default: <output_dir>/tmp_nanoprint_<PID>)
           Deleted on exit regardless of success or failure. Intermediates NOT
           persisted via --keep-* live here and are lost if a later step fails.
@@ -180,8 +189,47 @@ has_mod_tags() {
     [[ "${n:-0}" -gt 0 ]]
 }
 
+# ---------------------------------------------------------------------------
+# has_barcode_tags <bam> — true if the BAM carries dorado barcode classifications
+# (BC:Z:, written by dorado basecaller --kit-name). Same sampling as has_mod_tags.
+#
+# nanoprint demux splits on BC, and BC goes through the same `samtools fastq -T`
+# allowlist in Map_reads.sh that has silently dropped fn and MM/ML before.
+# ---------------------------------------------------------------------------
+has_barcode_tags() {
+    local bam="$1" n
+    [[ -f "$bam" ]] || return 1
+    set +o pipefail
+    n=$(samtools view "$bam" 2>/dev/null \
+        | head -n "$MOD_TAG_SCAN_READS" \
+        | grep -c "$(printf '\t')BC:Z:" || true)
+    set -o pipefail
+    [[ "${n:-0}" -gt 0 ]]
+}
+
+# ---------------------------------------------------------------------------
+# restore_rg_header <src_bam> <dst_bam> <tmp_dir>
+#
+# Map_reads.sh carries dorado's @RG header lines into the aligned BAM, so each per-read
+# RG tag resolves to its run, flowcell and models. Whether uncalled4 keeps input header
+# lines is untested (js4022 probe input had none). If <src_bam> has @RG lines and
+# <dst_bam> has none, append them to <dst_bam>'s header with samtools reheader. Must run
+# before <dst_bam> is indexed.
+# ---------------------------------------------------------------------------
+restore_rg_header() {
+    local src="$1" dst="$2" tmp="$3" n_src n_dst
+    n_src=$(samtools view -H "$src" | grep -c '^@RG' || true)
+    n_dst=$(samtools view -H "$dst" | grep -c '^@RG' || true)
+    if [[ "${n_src:-0}" -gt 0 && "${n_dst:-0}" -eq 0 ]]; then
+        echo "  Restoring ${n_src} @RG header line(s) not carried through uncalled4..."
+        { samtools view -H "$dst"; samtools view -H "$src" | grep '^@RG'; } > "${tmp}/rg_header.sam"
+        samtools reheader "${tmp}/rg_header.sam" "$dst" > "${tmp}/reheadered.bam"
+        mv "${tmp}/reheadered.bam" "$dst"
+    fi
+}
+
 cmd_preprocess() {
-    local INPUT="" GENOME="" OUTPUT="" THREADS="" MODEL="$DEFAULT_DORADO_MODEL" TMP_DIR=""
+    local INPUT="" GENOME="" OUTPUT="" THREADS="" MODEL="$DEFAULT_DORADO_MODEL" TMP_DIR="" KIT=""
     local KEEP_BASECALLED=false KEEP_ALIGNED=false KEEP_FILTERED=false
 
     # Manual loop (not getopts) — needed for --keep-* long options.
@@ -192,6 +240,7 @@ cmd_preprocess() {
             -o) OUTPUT="$2"; shift 2 ;;
             -p) THREADS="$2"; shift 2 ;;
             -m) MODEL="$2"; shift 2 ;;
+            -k) KIT="$2"; shift 2 ;;
             -T) TMP_DIR="$2"; shift 2 ;;
             --keep-basecalled) KEEP_BASECALLED=true; shift ;;
             --keep-aligned)    KEEP_ALIGNED=true; shift ;;
@@ -260,6 +309,7 @@ cmd_preprocess() {
     printf "%-10s %s\n" "Output:"  "$OUTPUT"
     printf "%-10s %s\n" "Threads:" "$THREADS"
     printf "%-10s %s\n" "Model:"   "$MODEL"
+    printf "%-10s %s\n" "Kit:"     "${KIT:-none (no barcode classification)}"
     printf "%-10s %s\n" "Tmp dir:" "$TMP_DIR"
     echo "========================================"
     echo ""
@@ -293,21 +343,33 @@ cmd_preprocess() {
         else
             BASECALLED="${TMP_DIR}/basecalled.bam"
         fi
+        local KIT_ARGS=()
+        [[ -n "$KIT" ]] && KIT_ARGS=(-k "$KIT")
         "$SCRIPTS/Dorado_basecall.sh" \
             -i "$INPUT" \
             -o "$BASECALLED" \
             -m "$MODEL" \
-            -t "$THREADS"
+            -t "$THREADS" \
+            ${KIT_ARGS[@]+"${KIT_ARGS[@]}"}
+
+        # A warning, not an error: aborting here would delete an ephemeral basecalled
+        # BAM that may represent days of GPU time, and a sample of reads that happens
+        # to be unclassified is possible. nanoprint demux reports the real numbers.
+        if [[ -n "$KIT" ]] && ! has_barcode_tags "$BASECALLED"; then
+            echo "Warning: -k $KIT was given, but none of the first $MOD_TAG_SCAN_READS basecalled" >&2
+            echo "         reads carry a BC:Z: barcode tag. Check the kit name before demux." >&2
+        fi
     fi
     echo ""
 
     # -----------------------------------------------------------------------
     # Step 2: Align to genome (preserving dorado tags)
-    # samtools fastq -T "MM,ML,mv,ts,pi,sp,ns,fn" | minimap2 -y keeps the tags
-    # uncalled4 needs for DTW signal alignment, the fn tag (source pod5 basename)
-    # that step 4 needs to split reads by pod5, and the MM/ML base modification
-    # calls. That -T list is an allowlist — see Map_reads.sh before adding a
-    # consumer that depends on any other dorado tag.
+    # samtools fastq -T "MM,ML,MN,mv,ts,pi,sp,ns,fn,BC,RG,qs" | minimap2 -y keeps
+    # the tags uncalled4 needs for DTW signal alignment, the fn tag (source pod5
+    # basename) that step 4 needs to split reads by pod5, the MM/ML/MN base
+    # modification calls, and the BC/RG barcode and read-group tags that
+    # nanoprint demux needs. That -T list is an allowlist — see Map_reads.sh
+    # before adding a consumer that depends on any other dorado tag.
     # -----------------------------------------------------------------------
     if [[ -n "$ALIGNED" || -n "$FILTERED" ]]; then
         echo "[2/4] Aligning to genome — skipped (reusing existing output)"
@@ -339,6 +401,23 @@ cmd_preprocess() {
             echo "         aligned:    $ALIGNED" >&2
             echo "" >&2
             echo "       Fix: add MM,ML to the tag allowlist in" >&2
+            echo "       workflow/scripts/Map_reads.sh (samtools fastq -T \"...\")." >&2
+            echo "" >&2
+            echo "       Then delete ${PERSIST_ALIGNED} if it exists and re-run with the" >&2
+            echo "       same -o. With --keep-basecalled the basecalling step is reused," >&2
+            echo "       so this costs no GPU time." >&2
+            exit 1
+        fi
+
+        # Same guard for the barcode classification nanoprint demux splits on.
+        if has_barcode_tags "$BASECALLED" && ! has_barcode_tags "$ALIGNED"; then
+            echo "" >&2
+            echo "Error: barcode tags (BC:Z:) are present in the basecalled BAM" >&2
+            echo "       but absent from the aligned BAM — alignment dropped them." >&2
+            echo "         basecalled: $BASECALLED" >&2
+            echo "         aligned:    $ALIGNED" >&2
+            echo "" >&2
+            echo "       Fix: add BC,RG to the tag allowlist in" >&2
             echo "       workflow/scripts/Map_reads.sh (samtools fastq -T \"...\")." >&2
             echo "" >&2
             echo "       Then delete ${PERSIST_ALIGNED} if it exists and re-run with the" >&2
@@ -512,29 +591,40 @@ cmd_preprocess() {
     echo "  Merging $N_UC4 per-pod5 BAMs, sorting, and indexing..."
     samtools cat -b "$UC4_BAM_LIST" \
         | samtools sort -@ "$THREADS" -T "${TMP_DIR}/sort_tmp" -o "$OUTPUT"
+    restore_rg_header "$FILTERED" "$OUTPUT" "$TMP_DIR"
     samtools index "$OUTPUT"
     echo ""
 
     # uncalled4 rewrites every record, and whether it propagates tags it does not
-    # itself use is outside our control. If the modification calls did not survive
-    # it, the filtered BAM is the last copy that has them — and unless
+    # itself use is outside our control. If the modification calls or barcode tags did
+    # not survive it, the filtered BAM is the last copy that has them — and unless
     # --keep-filtered was passed it lives in TMP_DIR, seconds away from the EXIT
-    # trap. Rescue it rather than silently destroying the only modBAM, which is
+    # trap. Rescue it rather than silently destroying the only copy, which is
     # what "retain the modification data" has to mean when the last tool in the
-    # chain is a third-party one.
-    if has_mod_tags "$FILTERED" && ! has_mod_tags "$OUTPUT"; then
-        echo "Warning: base modification tags (MM/ML) did not survive uncalled4 align." >&2
-        echo "         The Uncalled4 BAM has the DTW signal data but no methylation calls." >&2
+    # chain is a third-party one. (The js4022 probe, uncalled4 4.1.0, kept all
+    # of MM/ML/MN/BC/RG — this is a guard, not an expected path.)
+    local LOST_MOD=false LOST_BC=false
+    has_mod_tags "$FILTERED" && ! has_mod_tags "$OUTPUT" && LOST_MOD=true
+    has_barcode_tags "$FILTERED" && ! has_barcode_tags "$OUTPUT" && LOST_BC=true
+    if [[ "$LOST_MOD" == true || "$LOST_BC" == true ]]; then
+        [[ "$LOST_MOD" == true ]] && {
+            echo "Warning: base modification tags (MM/ML) did not survive uncalled4 align." >&2
+            echo "         The Uncalled4 BAM has the DTW signal data but no methylation calls." >&2
+        }
+        [[ "$LOST_BC" == true ]] && {
+            echo "Warning: barcode tags (BC:Z:) did not survive uncalled4 align." >&2
+            echo "         nanoprint demux cannot split the Uncalled4 BAM by barcode." >&2
+        }
         if [[ "$FILTERED" == "$PERSIST_FILTERED" ]]; then
-            echo "         The modification calls are preserved in: $PERSIST_FILTERED" >&2
+            echo "         The lost tags are preserved in: $PERSIST_FILTERED" >&2
         else
             echo "         Preserving the pre-uncalled4 BAM, which still has them:" >&2
             cp "$FILTERED" "$PERSIST_FILTERED"
             samtools index "$PERSIST_FILTERED"
             echo "           $PERSIST_FILTERED" >&2
         fi
-        echo "         Use that BAM for methylation analysis (modkit etc.), and the" >&2
-        echo "         Uncalled4 BAM for signal analysis." >&2
+        echo "         Use that BAM for methylation analysis (modkit etc.) and to recover" >&2
+        echo "         barcodes by read name, and the Uncalled4 BAM for signal analysis." >&2
         echo "" >&2
     fi
 
@@ -550,6 +640,65 @@ cmd_preprocess() {
 }
 
 # ---------------------------------------------------------------------------
+# demux subcommand — thin wrapper around workflow/scripts/Demux_bam.sh
+# ---------------------------------------------------------------------------
+
+usage_demux() {
+    cat << EOF
+Usage: $(basename "$0") demux -i <input.bam> -s <samplesheet.tsv> -o <out_dir> [-p <threads>]
+
+Split a barcoded BAM into per-sample BAMs by the dorado BC:Z: tag. Intended for the
+output of 'nanoprint preprocess -k <kit>'. One streaming pass; every tag (Uncalled4
+DTW, MM/ML, BC, RG) is kept.
+
+Required arguments:
+    -i    Input BAM (coordinate-sorted)
+    -s    Sample sheet, tab-separated: barcode<TAB>sample
+            barcode  barcodeNN or <kit>_barcodeNN
+            sample   letters, digits, '.', '_', '-'
+          Barcodes sharing a sample name are pooled into one BAM. Lines starting
+          with '#' are ignored. Reads with no BC tag, or a barcode not listed,
+          go to unclassified.bam.
+    -o    Output directory (must not already contain .bam files)
+
+Optional arguments:
+    -p    Threads for BAM decoding (default: 4)
+    -h    Show this help
+
+Outputs (in <out_dir>):
+    <sample>.bam(.bai)          one per sample name
+    unclassified.bam(.bai)
+    demux_counts.tsv            sample, barcode, run_id, reads, bases
+    samplesheet.normalized.tsv  the sheet as applied
+
+The run exits with an error if the output records do not add up to the input.
+
+Example (js4022: two barcodes per condition, pooled):
+    printf 'barcode01\\tBsub_PLBS338_0mMCTRL_js4022\\nbarcode07\\tBsub_PLBS338_0mMCTRL_js4022\\n' > samplesheet.tsv
+    $(basename "$0") demux -i results/js4022_all_uncalled4.bam -s samplesheet.tsv -o results/demux -p 8
+EOF
+    exit 1
+}
+
+cmd_demux() {
+    local INPUT="" SHEET="" OUT_DIR="" THREADS=4
+    [[ $# -eq 0 ]] && usage_demux
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -i) INPUT="$2"; shift 2 ;;
+            -s) SHEET="$2"; shift 2 ;;
+            -o) OUT_DIR="$2"; shift 2 ;;
+            -p) THREADS="$2"; shift 2 ;;
+            -h|--help) usage_demux ;;
+            *)
+                echo "Error: Unknown option: $1" >&2
+                usage_demux ;;
+        esac
+    done
+    "$SCRIPTS/Demux_bam.sh" -i "$INPUT" -s "$SHEET" -o "$OUT_DIR" -t "$THREADS"
+}
+
+# ---------------------------------------------------------------------------
 # main dispatch
 # ---------------------------------------------------------------------------
 
@@ -560,6 +709,7 @@ shift
 
 case "$SUBCOMMAND" in
     preprocess)  cmd_preprocess "$@" ;;
+    demux)       cmd_demux "$@" ;;
     -h|--help)   usage_main ;;
     *)
         echo "Error: Unknown subcommand '$SUBCOMMAND'" >&2

@@ -935,7 +935,7 @@ Pod5 input mode was added in js4016. The pipeline detects pod5 automatically at 
 raw_data/{sample}/          (pod5 files)
     ↓ dorado_basecall (phase 0)
 data/basecalled/{sample}.bam               ← dorado mv/ts/pi/sp/ns tags (move table) + MM/ML (mod calls)
-    ↓ map_reads (phase 1) — samtools fastq -T "MM,ML,mv,ts,pi,sp,ns,fn" | minimap2 -y (preserves tags)
+    ↓ map_reads (phase 1) — samtools fastq -T "MM,ML,MN,mv,ts,pi,sp,ns,fn,BC,RG,qs" | minimap2 -y (preserves tags)
 data/aligned_reads/{genome}/{sample}.bam   ← reference-aligned AND still has mv + MM/ML tags
     ↓ filter_alignments (phase 1) — samtools view preserves all tags by default
 data/filtered_alignments/{genome}/{sample}.bam
@@ -958,7 +958,7 @@ data/signal_bw_merged/{genome}/significance_threshold_{sig}/{sample}_{strand}.bw
 ```bash
 # Step 1 — signal alignment (slow; run once per sample):
 # --bam-in must be an aligned BAM (with @SQ header) that STILL HAS the dorado mv/ts/pi/sp/ns tags.
-# Map_reads.sh preserves these via: samtools fastq -T "MM,ML,mv,ts,pi,sp,ns,fn" | minimap2 -y -a ...
+# Map_reads.sh preserves these via: samtools fastq -T "MM,ML,MN,mv,ts,pi,sp,ns,fn,BC,RG,qs" | minimap2 -y -a ...
 # Use data/filtered_alignments/ (samtools view keeps all tags; the tags are already in aligned_reads).
 # Do NOT pass data/basecalled/ (unaligned BAM — no @SQ header → pysam ValueError).
 uncalled4 align --bam-in <filtered_alignments.bam> --ref <fa> --reads <pod5> -p <threads> -o <out.bam>
@@ -1064,7 +1064,7 @@ list when given a `.txt` path). The original incorrect comment claiming pod5 C++
 has been corrected.
 
 **Uncalled4 — `--min-aln-length 50` required for short synthetic genomes (js4004 + js4016):**
-uncalled4's default minimum alignment length is ~200 bp (designed for WGS). For short synthetic
+uncalled4's default minimum alignment length is 100 aligned bases (`uncalled4 align -h`, 4.1.0; this note previously said ~200 bp). For short synthetic
 targets (G4 oligos ~86–89 bp), ALL reads fail the default threshold, producing
 `Counter({'Alignment too short': N})` and an empty BAM. Fix: add `--min-aln-length 50`.
 This is safe for WGS too (long reads produce alignments >> 50 bp). First seen in js4004
@@ -1373,3 +1373,48 @@ samtools view /tmp/probe_basecalled.bam | head -100 | grep -c 'MM:Z:'   # >0 →
 samtools view /tmp/probe_aligned.bam    | head -100 | grep -c 'MM:Z:'   # >0 → tag list is right
 samtools view /tmp/probe.bam            | head -100 | grep -c 'MM:Z:'   # answers the uncalled4 question
 ```
+
+### Barcoded runs: `preprocess -k` and `nanoprint demux` (js4022, Sep 2026)
+
+js4022 (*B. subtilis*, SQK-RBK114-24, 12 barcodes over 3 MinKNOW runs, 1690 pod5 files / 703 GB) needed every barcode and run basecalled together, then split into pooled per-condition BAMs.
+
+**Design: classify in the basecaller, keep the barcode as a tag, split last.**
+- `preprocess -k <kit>` → `Dorado_basecall.sh -k` → `dorado basecaller ... --kit-name <kit> --no-trim`, still writing to stdout, so all barcodes land in one BAM.
+- Reads keep `BC:Z:<kit>_barcodeNN` (unclassified reads have no `BC`) and `RG:Z:<runid>_<model>_<kit>_barcodeNN` through every step.
+- `nanoprint demux` (`Demux_bam.sh`) splits the final Uncalled4 BAM with a barcode → sample sheet. Barcodes sharing a sample name are pooled.
+- Nothing downstream of basecalling is per-barcode, so regrouping differently later means only rerunning demux.
+
+**Why `--no-trim`:** trimming changes the read sequence. Whether dorado adjusts `mv`/`ts` to match is undocumented, and `dorado demux -h` warns trimming discards mapping information. Untrimmed reads keep sequence, moves and signal consistent; minimap2 soft-clips the ~90 bp barcode/adapter. In the probe, Uncalled4 aligned 1842/1842 filtered reads.
+
+**Why samtools and not `dorado demux` for the split:** `samtools view` is known to keep every aux tag (Uncalled4 DTW tags, `MM`/`ML`); dorado demux's handling of them is untested. `dorado demux --no-classify --no-trim --emit-summary` is still a useful cross-check on counts.
+
+**Map_reads.sh allowlist grew again — third consumer of the same trap.** It went from `MM,ML,mv,ts,pi,sp,ns,fn` to `MM,ML,MN,mv,ts,pi,sp,ns,fn,BC,RG,qs`:
+- `BC`: demux.
+- `RG`: run + barcode per read.
+- `MN`: lets modkit check `MM`/`ML` against the sequence length.
+- `qs`: read Q-score.
+
+Guards, following the `has_mod_tags` pattern (`has_barcode_tags` in `bin/nanoprint`):
+- **after step 1:** warning only if `-k` was given and no `BC` tags appear. Aborting would delete an ephemeral multi-day basecall.
+- **after step 2:** hard error if `BC` is in the basecalled BAM but not the aligned BAM.
+- **after step 4:** the existing MM rescue now also fires for lost `BC` (warn + keep `_filtered.bam`).
+
+**`@RG` header lines:** minimap2 writes its own header with no `@RG`, so the per-read `RG` tags would reference undefined read groups.
+- `Map_reads.sh` now `cat`s the input BAM's `@RG` header lines into the SAM stream ahead of minimap2's output. htslib accepts header lines in any order before the first record, so this costs nothing — no reheader copy of an 80 GB BAM.
+- `restore_rg_header()` re-applies them after the step 4 merge if uncalled4 dropped them (untested whether it does), before indexing.
+
+**Demux implementation notes (`Demux_bam.sh`):**
+- One `samtools view | awk` pass. One `samtools view -b` pipe per sample plus `unclassified`, all opened in `BEGIN` and sent the header, so a sample with 0 reads still gets a valid (empty) BAM and a warning. Seven pipes is nowhere near the fd limit that bit step 4 (Bug 1 above), because pipes are per sample, not per pod5.
+- The barcode is normalized by matching `barcode[0-9]+$`, so the sheet accepts `barcode01` or `SQK-RBK114-24_barcode01`.
+- Run ID = `RG` value up to the first `_` (the MinKNOW run UUID has only hyphens).
+- A coordinate-sorted input (`@HD SO:coordinate`) gives sorted outputs, indexed directly; other input is sorted per output first.
+- **Count check:** input records (from `idxstats` if indexed) must equal both the sum of output records and the sum of `demux_counts.tsv`, otherwise exit 1. Same lesson as `Uncalled4_convert_tsv.sh`: when a pipeline can fail quietly, compare what came out against what went in.
+- Refuses an output directory that already contains `.bam` files, rather than mixing runs.
+- awk sticks to POSIX features (no `[[:space:]]`, no gawk extensions), because hermes' default awk may be mawk.
+
+**Probe evidence (hermes, dorado 1.3.2, uncalled4 4.1.0, minimap2 2.31, one pod5, 2000 reads):**
+- `sup@v5.2.0,4mC_5mC,6mA` resolves to `sup@v5.2.0` + `4mC_5mC@v1` + `6mA@v1` (`MM` codes `C+m`, `C+21839`, `A+a`).
+- 1974/2007 records have `BC`.
+- `mv` is kept with `--kit-name`.
+- 1842 records after MAPQ ≥ 20 all align in Uncalled4; `BC`, `RG`, `MM`, `ML`, `MN`, `fn`, `mv`, `ts` and `qs` all survive.
+- Uncalled4 auto-detected `FLO-PRO114M`/`SQK-RBK114-24`; `--basecaller-profile` made no difference.

@@ -178,6 +178,43 @@ Transfer both output files to ROAR, then point the `^r` line in CONFIG at the Un
 
 See the [Dependencies](#dependencies) section for full installation details, including the critical `pyarrow<20` pin that prevents a deadlock in uncalled4.
 
+## Barcoded runs: `-k` and `nanoprint demux`
+
+For multiplexed libraries, basecall all pod5 files — every barcode, every run, pass and fail — in one `preprocess` job, keep each read's barcode as a tag, and split at the end:
+
+```bash
+nanoprint preprocess -i /path/to/raw_data_dir/ -g genome.fa -o all_uncalled4.bam \
+    -k SQK-RBK114-24 -m 'sup@v5.2.0,4mC_5mC,6mA' -p <threads> --keep-all
+
+nanoprint demux -i all_uncalled4.bam -s samplesheet.tsv -o demux/ -p <threads>
+```
+
+**`-k <kit>`** adds `--kit-name <kit> --no-trim` to dorado:
+- Reads are classified during basecalling and tagged `BC:Z:<kit>_barcodeNN`; unclassified reads have no `BC` tag.
+- All barcodes stay in one BAM. Dorado's `--output-dir` would nest them into folders instead, so it isn't used.
+- Reads are **not trimmed**, so sequence, move table and raw signal stay consistent for Uncalled4. minimap2 soft-clips the barcode and adapter.
+- MinKNOW's own `pod5_pass/barcodeNN` folders come from the live basecaller and are ignored; point `-i` at the whole run directory.
+
+`BC` and `RG` (run + model + barcode) join the tags `Map_reads.sh` carries through alignment. Its allowlist is now `MM,ML,MN,mv,ts,pi,sp,ns,fn,BC,RG,qs`, and dorado's `@RG` header lines are copied into the aligned BAM. `preprocess` stops with an error if barcode tags are lost at alignment, and preserves the filtered BAM if they are lost at Uncalled4.
+
+**`nanoprint demux`** splits by `BC` using a tab-separated sample sheet (`barcode<TAB>sample`):
+- Barcodes that share a sample name are pooled into one BAM.
+- Reads with no `BC` tag, or a barcode not in the sheet, go to `unclassified.bam`.
+- The split is one streaming `samtools` pass, so every tag (Uncalled4 DTW, `MM`/`ML`, `BC`, `RG`) is kept.
+- Outputs: `<sample>.bam` + `.bai` per sample, `unclassified.bam`, and `demux_counts.tsv` (sample, barcode, run_id, reads, bases). Pooled barcodes and runs therefore stay separable.
+- It exits with an error if output records don't add up to input records.
+
+```
+# samplesheet.tsv — two barcodes pooled into one sample
+barcode01	Bsub_PLBS338_0mMCTRL_js4022
+barcode07	Bsub_PLBS338_0mMCTRL_js4022
+```
+
+Tested on dorado 1.3.2 + uncalled4 4.1.0 with SQK-RBK114-24 (js4022):
+- `--kit-name` keeps `mv`/`ts`.
+- Uncalled4 auto-detects `FLO-PRO114M`/`SQK-RBK114-24` and aligns untrimmed reads.
+- Uncalled4 keeps `BC`, `RG`, `MM`, `ML` and `MN`.
+
 ---
 
 # Inputs

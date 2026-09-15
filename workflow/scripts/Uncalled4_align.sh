@@ -3,13 +3,15 @@
 # Uncalled4_align.sh - Align raw nanopore signals to the pore model using Uncalled4
 # Takes a reference-aligned BAM with dorado move tags (mv,ts,pi,sp,ns) and pod5 files.
 # The BAM must be aligned AND retain the move tags from dorado --emit-moves.
-# Map_reads.sh preserves these via samtools fastq -T "MM,ML,mv,ts,pi,sp,ns,fn" + minimap2 -y
-# (that list is an allowlist; uncalled4 needs only the move tags, but MM/ML must ride along
-# for downstream methylation analysis — see the note in Map_reads.sh).
+# Map_reads.sh preserves these via samtools fastq -T "MM,ML,MN,mv,ts,pi,sp,ns,fn,BC,RG,qs" +
+# minimap2 -y (that list is an allowlist; uncalled4 needs only the move tags, but MM/ML/MN
+# and BC/RG must ride along for methylation analysis and nanoprint demux — see the note in
+# Map_reads.sh). uncalled4 4.1.0 keeps all of them in its output (js4022 probe).
 # Produces a BAM with signal-level DTW alignment data.
 #
-# --min-aln-length 50: uncalled4 default is ~200 bp (for WGS). Short synthetic targets
-# (G4 oligos ~86-89 bp) would all fail the default threshold. 50 bp works for both.
+# --min-aln-length 50: uncalled4's default is 100 aligned bases (4.1.0 `align -h`; older
+# notes said ~200). Short synthetic targets (G4 oligos ~86-89 bp) fail the default
+# threshold. 50 bp works for both.
 #
 # Usage: Uncalled4_align.sh -i <filtered_alignments.bam> -p <pod5_path> -g <genome.fa> -o <out.bam> [-t <threads>]
 #
@@ -27,7 +29,7 @@ Usage: $(basename "$0") -i <filtered_alignments.bam> -p <pod5_path> -g <genome.f
 
 Align raw nanopore signals to the pore model reference using Uncalled4 (BAM output).
 Input BAM must be a reference-aligned BAM that retains dorado move tags (mv, ts, pi, sp, ns).
-Map_reads.sh produces this via: samtools fastq -T "MM,ML,mv,ts,pi,sp,ns,fn" | minimap2 -y -a ...
+Map_reads.sh produces this via: samtools fastq -T "MM,ML,MN,mv,ts,pi,sp,ns,fn,BC,RG,qs" | minimap2 -y -a ...
 The tags survive through filter_alignments (samtools view preserves all BAM tags by default).
 
 Required arguments:
