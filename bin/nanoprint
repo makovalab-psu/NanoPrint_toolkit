@@ -131,6 +131,11 @@ Persisted files are written as:
     <output_dir>/<output_stem>_aligned.bam
     <output_dir>/<output_stem>_filtered.bam (+ .bai)
 
+Step 4 always writes its per-pod5 Uncalled4 BAMs to <output_dir>/<output_stem>_uc4_parts/,
+whatever --keep-* flags are given. If a run fails after or during step 4, rerun with
+the same -o and only the pod5 files not yet done are aligned again. The folder is
+removed once the final BAM is indexed.
+
 Auto-resume: if one of these files already exists when preprocess starts, that
 step AND every step before it are skipped, and the existing file is reused —
 even if you don't pass the matching --keep-* flag on this invocation. This is
@@ -474,7 +479,7 @@ cmd_preprocess() {
         find "$INPUT" -name "*.pod5" -type f | sort > "$POD5_LIST"
     fi
     local N_POD5
-    N_POD5=$(wc -l < "$POD5_LIST")
+    N_POD5=$(wc -l < "$POD5_LIST" | tr -d ' ')
     [[ "$N_POD5" -eq 0 ]] && { echo "Error: No .pod5 files found under $INPUT" >&2; exit 1; }
     echo "  Found $N_POD5 pod5 file(s)"
 
@@ -490,11 +495,40 @@ cmd_preprocess() {
         exit 1
     fi
 
+    # Per-pod5 Uncalled4 BAMs are written next to -o, not into TMP_DIR. In js4022 the
+    # merge below failed after ~1.5 days of Uncalled4 over 1690 pod5s, and the EXIT
+    # trap deleted every per-pod5 BAM with TMP_DIR. Kept here, a rerun with the same
+    # -o skips each pod5 already done. A pod5 is done if its <stem>_uc4.bam exists
+    # (uncalled4 writes into partial/ and the file is mv'd in only when finished) or
+    # it is listed in no_reads.txt. The directory is removed once the final BAM is
+    # indexed.
+    local UC4_DIR="${OUT_DIR}/${STEM}_uc4_parts"
+    local UC4_NO_READS="${UC4_DIR}/no_reads.txt"
+    mkdir -p "${UC4_DIR}/partial"
+    touch "$UC4_NO_READS"
+
+    local DONE_LIST="${TMP_DIR}/uc4_done.txt"
+    local TODO_LIST="${TMP_DIR}/uc4_todo.txt"
+    {
+        find "$UC4_DIR" -maxdepth 1 -name '*_uc4.bam' | sed 's#.*/##; s/_uc4\.bam$/.pod5/'
+        cat "$UC4_NO_READS"
+    } > "$DONE_LIST"
+    awk -F/ -v done="$DONE_LIST" '
+        BEGIN { while ((getline l < done) > 0) d[l] = 1 }
+        !($NF in d)' "$POD5_LIST" > "$TODO_LIST"
+    local N_TODO
+    N_TODO=$(wc -l < "$TODO_LIST" | tr -d ' ')
+    if [[ "$N_TODO" -lt "$N_POD5" ]]; then
+        echo "  Resuming: $((N_POD5 - N_TODO)) of $N_POD5 pod5 file(s) already done in $UC4_DIR"
+    fi
+
+    if [[ "$N_TODO" -gt 0 ]]; then
     # Split filtered BAM into per-pod5 BAMs.
     # Strategy: sort by fn:Z: tag so all reads from the same pod5 are adjacent,
     # then stream through awk keeping only ONE samtools pipe open at a time.
     # (The naive approach of opening one pipe per pod5 simultaneously fails with
     # EMFILE once the pod5 count exceeds ~ulimit -n / 2, typically ~500.)
+    # Reads from pod5s that are already done are dropped here.
     local SPLIT_DIR="${TMP_DIR}/split"
     mkdir -p "$SPLIT_DIR"
     local HEADER_SAM="${SPLIT_DIR}/_header.sam"
@@ -508,9 +542,10 @@ cmd_preprocess() {
 
     echo "  Splitting by pod5 source (single pass, BAM output)..."
     samtools view -@ "$THREADS" "$FN_SORTED" \
-      | awk -v dir="$SPLIT_DIR" -v hdr="$HEADER_SAM" '
+      | awk -v dir="$SPLIT_DIR" -v hdr="$HEADER_SAM" -v done="$DONE_LIST" '
     BEGIN {
         while ((getline line < hdr) > 0) header = header line "\n"
+        while ((getline line < done) > 0) d[line] = 1
         cur_stem = ""; cur_cmd = ""
     }
     {
@@ -518,6 +553,7 @@ cmd_preprocess() {
         for (i = 12; i <= NF; i++) {
             if (substr($i, 1, 5) == "fn:Z:") { fn = substr($i, 6); break }
         }
+        if (fn in d) next
         if (fn == "") fn = "_no_fn"
         stem = fn; sub(/\.pod5$/, "", stem)
         if (stem != cur_stem) {
@@ -537,11 +573,6 @@ cmd_preprocess() {
     echo "  Split complete."
 
     # Process each pod5 in turn — sequential I/O, no random cross-file seeking
-    local UC4_DIR="${TMP_DIR}/uc4"
-    mkdir -p "$UC4_DIR"
-    local UC4_BAM_LIST="${TMP_DIR}/uc4_bams.txt"
-    > "$UC4_BAM_LIST"
-
     local pod5_num=0
     while IFS= read -r pod5_file; do
         pod5_num=$((pod5_num + 1))
@@ -549,48 +580,78 @@ cmd_preprocess() {
         fn_name="$(basename "$pod5_file")"
         local pod5_stem="${fn_name%.pod5}"
         local split_bam="${SPLIT_DIR}/${pod5_stem}.bam"
+        local uc4_partial="${UC4_DIR}/partial/${pod5_stem}_uc4.bam"
         local uc4_bam="${UC4_DIR}/${pod5_stem}_uc4.bam"
 
         if [[ ! -f "$split_bam" ]]; then
-            echo "  [$pod5_num/$N_POD5] $fn_name — no reads after filtering, skipped"
+            echo "  [$pod5_num/$N_TODO] $fn_name — no reads after filtering, skipped"
+            echo "$fn_name" >> "$UC4_NO_READS"
             continue
         fi
 
-        echo "  [$pod5_num/$N_POD5] $fn_name"
+        echo "  [$pod5_num/$N_TODO] $fn_name"
 
         samtools index "$split_bam"
 
         # uncalled4 returns non-zero when any reads fail DTW; use || true and
         # check for output rather than relying on exit code.
+        rm -f "$uc4_partial"
         uncalled4 align \
             --bam-in "$split_bam" \
             --ref    "$GENOME" \
             --reads  "$pod5_file" \
             -p       "$THREADS" \
             --min-aln-length 50 \
-            -o       "$uc4_bam" || true
+            -o       "$uc4_partial" || true
 
         rm -f "$split_bam" "${split_bam}.bai"
 
-        if [[ -f "$uc4_bam" ]]; then
-            echo "$uc4_bam" >> "$UC4_BAM_LIST"
+        if [[ -f "$uc4_partial" ]]; then
+            mv "$uc4_partial" "$uc4_bam"
         else
             echo "    Warning: uncalled4 produced no output for $fn_name" >&2
         fi
-    done < "$POD5_LIST"
+    done < "$TODO_LIST"
+    fi
 
+    local UC4_BAM_LIST="${TMP_DIR}/uc4_bams.txt"
+    find "$UC4_DIR" -maxdepth 1 -name '*_uc4.bam' | sort > "$UC4_BAM_LIST"
     local N_UC4
-    N_UC4=$(wc -l < "$UC4_BAM_LIST")
+    N_UC4=$(wc -l < "$UC4_BAM_LIST" | tr -d ' ')
     if [[ "$N_UC4" -eq 0 ]]; then
         echo "Error: Uncalled4 produced no output BAMs" >&2
         exit 1
     fi
 
-    # Concatenate all per-pod5 uncalled4 BAMs (unsorted), sort once, and index
+    # Concatenate all per-pod5 uncalled4 BAMs (unsorted), sort once, and index.
+    # samtools cat opens every input at once. In js4022, 1608 inputs hit the
+    # default soft limit of 1024 open files ("Too many open files"). So raise the
+    # soft limit to the hard limit, and if the inputs still don't fit, cat them in
+    # batches first.
     echo ""
     echo "  Merging $N_UC4 per-pod5 BAMs, sorting, and indexing..."
-    samtools cat -b "$UC4_BAM_LIST" \
+    ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
+    local MAX_OPEN
+    MAX_OPEN=$(ulimit -n)
+    [[ "$MAX_OPEN" == unlimited ]] && MAX_OPEN=1048576
+    MAX_OPEN=$((MAX_OPEN - 64))          # headroom for samtools' own files
+    [[ "$MAX_OPEN" -lt 100 ]] && MAX_OPEN=100
+    local CAT_LIST="$UC4_BAM_LIST"
+    if [[ "$N_UC4" -gt "$MAX_OPEN" ]]; then
+        echo "  Open-file limit is $(ulimit -n); concatenating in batches of $MAX_OPEN first..."
+        local CAT_DIR="${TMP_DIR}/cat_batches"
+        mkdir -p "$CAT_DIR"
+        split -l "$MAX_OPEN" -d -a 4 "$UC4_BAM_LIST" "${CAT_DIR}/list_"
+        local lst
+        for lst in "${CAT_DIR}"/list_*; do
+            samtools cat -b "$lst" -o "${CAT_DIR}/batch_${lst##*list_}.bam"
+        done
+        find "$CAT_DIR" -name 'batch_*.bam' | sort > "${CAT_DIR}/batches.txt"
+        CAT_LIST="${CAT_DIR}/batches.txt"
+    fi
+    samtools cat -b "$CAT_LIST" \
         | samtools sort -@ "$THREADS" -T "${TMP_DIR}/sort_tmp" -o "$OUTPUT"
+    rm -rf "${TMP_DIR}/cat_batches"
     restore_rg_header "$FILTERED" "$OUTPUT" "$TMP_DIR"
     samtools index "$OUTPUT"
     echo ""
@@ -627,6 +688,9 @@ cmd_preprocess() {
         echo "         barcodes by read name, and the Uncalled4 BAM for signal analysis." >&2
         echo "" >&2
     fi
+
+    # The final BAM is indexed, so the per-pod5 parts are no longer needed.
+    rm -rf "$UC4_DIR"
 
     echo "========================================"
     echo " Done."

@@ -195,6 +195,8 @@ nanoprint demux -i all_uncalled4.bam -s samplesheet.tsv -o demux/ -p <threads>
 - Reads are **not trimmed**, so sequence, move table and raw signal stay consistent for Uncalled4. minimap2 soft-clips the barcode and adapter.
 - MinKNOW's own `pod5_pass/barcodeNN` folders come from the live basecaller and are ignored; point `-i` at the whole run directory.
 
+Step 4 writes each pod5's Uncalled4 BAM to `<output_dir>/<output_stem>_uc4_parts/`, outside the temp folder. If the run fails during or after Uncalled4, rerun the same command and only the unfinished pod5 files are aligned again. The folder is removed when the final BAM is indexed.
+
 `BC` and `RG` (run + model + barcode) join the tags `Map_reads.sh` carries through alignment. Its allowlist is now `MM,ML,MN,mv,ts,pi,sp,ns,fn,BC,RG,qs`, and dorado's `@RG` header lines are copied into the aligned BAM. `preprocess` stops with an error if barcode tags are lost at alignment, and preserves the filtered BAM if they are lost at Uncalled4.
 
 **`nanoprint demux`** splits by `BC` using a tab-separated sample sheet (`barcode<TAB>sample`):

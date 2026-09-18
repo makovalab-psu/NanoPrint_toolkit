@@ -1418,3 +1418,14 @@ Guards, following the `has_mod_tags` pattern (`has_barcode_tags` in `bin/nanopri
 - `mv` is kept with `--kit-name`.
 - 1842 records after MAPQ ≥ 20 all align in Uncalled4; `BC`, `RG`, `MM`, `ML`, `MN`, `fn`, `mv`, `ts` and `qs` all survive.
 - Uncalled4 auto-detected `FLO-PRO114M`/`SQK-RBK114-24`; `--basecaller-profile` made no difference.
+
+**Step 4 merge hit the open-file limit, and the EXIT trap deleted ~1.5 days of Uncalled4 output (js4022, full run, Sep 2026).**
+- Uncalled4 finished all 1690 pod5s (1608 had reads). Then `samtools cat -b <1608 BAMs> | samtools sort` failed with `Too many open files`, because `samtools cat` opens every input at once and hermes' soft `ulimit -n` is 1024. This is the same limit as Bug 1 above, now in the merge instead of the split.
+- The per-pod5 BAMs lived in `TMP_DIR/uc4/`, so the EXIT trap deleted them. `_filtered.bam` (`--keep-all`) survived, so only step 4 had to be redone.
+- **Fix 1, the merge:** raise the soft limit to the hard limit (`ulimit -n "$(ulimit -Hn)"`). If the input count still exceeds limit − 64, `samtools cat` in batches into `TMP_DIR/cat_batches/`, then cat the batches. The batch path needs ~1× the Uncalled4 output in extra disk.
+- **Fix 2, resume per pod5:** the per-pod5 BAMs now go to `<out_dir>/<stem>_uc4_parts/`, outside `TMP_DIR`, whatever the `--keep-*` flags.
+  - uncalled4 writes into `partial/`, and the BAM is `mv`'d up a level only when finished, so a pod5 is done only if `<stem>_uc4.bam` exists.
+  - Pod5s with no reads after filtering are listed in `no_reads.txt`.
+  - A rerun with the same `-o` drops the done pod5s' reads in the split pass and aligns only the rest. If all are done, the fn-sort and split are skipped.
+  - The folder is removed after the final BAM is indexed.
+- Tested locally with a fake `uncalled4`: 310 pod5s (300 with reads), `ulimit -n 200`, killed after 150 pod5s. The rerun resumed 154 done, aligned 151 (149 + 151 = 300), batched the merge in 3 × ≤136, and gave 900/900 reads with no duplicates. It also passed with a soft limit of 200 raised to a hard limit of 1024 (no batching).
