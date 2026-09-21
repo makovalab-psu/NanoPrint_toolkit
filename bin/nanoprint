@@ -504,8 +504,9 @@ cmd_preprocess() {
     # indexed.
     local UC4_DIR="${OUT_DIR}/${STEM}_uc4_parts"
     local UC4_NO_READS="${UC4_DIR}/no_reads.txt"
+    local UC4_SORTED="${UC4_DIR}/sorted.txt"
     mkdir -p "${UC4_DIR}/partial"
-    touch "$UC4_NO_READS"
+    touch "$UC4_NO_READS" "$UC4_SORTED"
 
     local DONE_LIST="${TMP_DIR}/uc4_done.txt"
     local TODO_LIST="${TMP_DIR}/uc4_todo.txt"
@@ -607,7 +608,17 @@ cmd_preprocess() {
         rm -f "$split_bam" "${split_bam}.bai"
 
         if [[ -f "$uc4_partial" ]]; then
-            mv "$uc4_partial" "$uc4_bam"
+            # uncalled4 writes records in signal-processing order while inheriting
+            # the input's SO:coordinate header — a header that lies. The final merge
+            # streams the parts in coordinate order and trusts it, so sort here, per
+            # pod5 (~100 MB), rather than re-sorting the whole ~260 GB concatenation
+            # at the end. Sorting into partial/ and moving up keeps the invariant
+            # that <stem>_uc4.bam exists only when that pod5 is completely done.
+            samtools sort -@ "$THREADS" -T "${UC4_DIR}/partial/sort_tmp" \
+                -o "${uc4_partial}.sorted" "$uc4_partial"
+            rm -f "$uc4_partial"
+            mv "${uc4_partial}.sorted" "$uc4_bam"
+            basename "$uc4_bam" >> "$UC4_SORTED"
         else
             echo "    Warning: uncalled4 produced no output for $fn_name" >&2
         fi
@@ -623,35 +634,99 @@ cmd_preprocess() {
         exit 1
     fi
 
-    # Concatenate all per-pod5 uncalled4 BAMs (unsorted), sort once, and index.
-    # samtools cat opens every input at once. In js4022, 1608 inputs hit the
-    # default soft limit of 1024 open files ("Too many open files"). So raise the
-    # soft limit to the hard limit, and if the inputs still don't fit, cat them in
-    # batches first.
+    # Parts written before per-pod5 sorting existed are still in uncalled4's
+    # processing order. Sort them once, one at a time (~1 part of extra disk), and
+    # record them, so a rerun does not sort them again.
+    local UNSORTED_LIST="${TMP_DIR}/uc4_unsorted.txt"
+    awk -F/ -v sorted="$UC4_SORTED" '
+        BEGIN { while ((getline l < sorted) > 0) s[l] = 1 }
+        !($NF in s)' "$UC4_BAM_LIST" > "$UNSORTED_LIST"
+    local N_UNSORTED
+    N_UNSORTED=$(wc -l < "$UNSORTED_LIST" | tr -d ' ')
+    if [[ "$N_UNSORTED" -gt 0 ]]; then
+        echo ""
+        echo "  Coordinate-sorting $N_UNSORTED per-pod5 BAM(s) from an earlier run..."
+        local part n_sorted=0
+        while IFS= read -r part; do
+            n_sorted=$((n_sorted + 1))
+            [[ $((n_sorted % 100)) -eq 0 ]] && echo "    [$n_sorted/$N_UNSORTED]"
+            samtools sort -@ "$THREADS" -T "${UC4_DIR}/partial/sort_tmp" \
+                -o "${part}.sorted" "$part"
+            mv "${part}.sorted" "$part"
+            basename "$part" >> "$UC4_SORTED"
+        done < "$UNSORTED_LIST"
+        echo "    [$N_UNSORTED/$N_UNSORTED] done."
+    fi
+
+    # Merge the coordinate-sorted per-pod5 BAMs, then index.
+    #
+    # samtools merge streams sorted inputs straight into a sorted output with no
+    # temporary spill. The earlier `samtools cat | samtools sort` instead wrote
+    # ~250 GB of sort temp files while the 263 GB of parts were still on disk, and
+    # filled /storage 90 GB into an expected ~263 GB output. samtools reported that
+    # as "Illegal seek" — a stale errno from the failed write, not a seek problem.
+    #
+    # -c/-p combine the identical @RG/@PG headers that every part carries; without
+    # them samtools amends the colliding IDs and the output gets one @RG per part
+    # (1608 x 25 here), which breaks the run_id parsing in nanoprint demux.
+    #
+    # merge still opens every input at once, so the open-file limit is raised first
+    # (1608 inputs vs hermes' soft limit of 1024), with a batched fallback.
     echo ""
-    echo "  Merging $N_UC4 per-pod5 BAMs, sorting, and indexing..."
+    echo "  Merging $N_UC4 per-pod5 BAMs and indexing..."
     ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
     local MAX_OPEN
     MAX_OPEN=$(ulimit -n)
     [[ "$MAX_OPEN" == unlimited ]] && MAX_OPEN=1048576
     MAX_OPEN=$((MAX_OPEN - 64))          # headroom for samtools' own files
     [[ "$MAX_OPEN" -lt 100 ]] && MAX_OPEN=100
-    local CAT_LIST="$UC4_BAM_LIST"
-    if [[ "$N_UC4" -gt "$MAX_OPEN" ]]; then
-        echo "  Open-file limit is $(ulimit -n); concatenating in batches of $MAX_OPEN first..."
-        local CAT_DIR="${TMP_DIR}/cat_batches"
-        mkdir -p "$CAT_DIR"
-        split -l "$MAX_OPEN" -d -a 4 "$UC4_BAM_LIST" "${CAT_DIR}/list_"
-        local lst
-        for lst in "${CAT_DIR}"/list_*; do
-            samtools cat -b "$lst" -o "${CAT_DIR}/batch_${lst##*list_}.bam"
-        done
-        find "$CAT_DIR" -name 'batch_*.bam' | sort > "${CAT_DIR}/batches.txt"
-        CAT_LIST="${CAT_DIR}/batches.txt"
+
+    # The merged BAM is about the size of the parts, and a batched merge needs room
+    # for one extra full copy. Checked here rather than discovered two thirds of the
+    # way through writing it.
+    local PARTS_KB AVAIL_KB NEED_KB
+    PARTS_KB=$(du -sk "$UC4_DIR" | cut -f1)
+    AVAIL_KB=$(df -Pk "$OUT_DIR" | awk 'NR==2 {print $4}')
+    NEED_KB="$PARTS_KB"
+    [[ "$N_UC4" -gt "$MAX_OPEN" ]] && NEED_KB=$((PARTS_KB * 2))
+    if [[ "${AVAIL_KB:-0}" -lt "$NEED_KB" ]]; then
+        echo "Error: not enough free disk to merge the per-pod5 Uncalled4 BAMs." >&2
+        printf "       parts:  %s GiB in %s\n" "$((PARTS_KB / 1048576))" "$UC4_DIR" >&2
+        printf "       needed: %s GiB\n" "$((NEED_KB / 1048576))" >&2
+        printf "       free:   %s GiB on the filesystem holding %s\n" \
+            "$((AVAIL_KB / 1048576))" "$OUT_DIR" >&2
+        echo "       Free space and rerun with the same -o: the finished per-pod5 BAMs" >&2
+        echo "       are kept, so the rerun resumes here at the merge." >&2
+        exit 1
     fi
-    samtools cat -b "$CAT_LIST" \
-        | samtools sort -@ "$THREADS" -T "${TMP_DIR}/sort_tmp" -o "$OUTPUT"
-    rm -rf "${TMP_DIR}/cat_batches"
+
+    # Merge into a temp name and rename only once quickcheck passes, so a failure
+    # never leaves a truncated BAM sitting at the output path looking finished.
+    local MERGE_TMP="${OUTPUT%.bam}.merge_tmp.bam"
+    rm -f "$MERGE_TMP"
+    local MERGE_LIST="$UC4_BAM_LIST"
+    if [[ "$N_UC4" -gt "$MAX_OPEN" ]]; then
+        echo "  Open-file limit is $(ulimit -n); merging in batches of $MAX_OPEN first..."
+        local MERGE_DIR="${TMP_DIR}/merge_batches"
+        mkdir -p "$MERGE_DIR"
+        split -l "$MAX_OPEN" -d -a 4 "$UC4_BAM_LIST" "${MERGE_DIR}/list_"
+        local lst
+        for lst in "${MERGE_DIR}"/list_*; do
+            samtools merge -@ "$THREADS" -c -p \
+                -b "$lst" -o "${MERGE_DIR}/batch_${lst##*list_}.bam"
+        done
+        find "$MERGE_DIR" -name 'batch_*.bam' | sort > "${MERGE_DIR}/batches.txt"
+        MERGE_LIST="${MERGE_DIR}/batches.txt"
+    fi
+    samtools merge -@ "$THREADS" -c -p -b "$MERGE_LIST" -o "$MERGE_TMP"
+    rm -rf "${TMP_DIR}/merge_batches"
+    if ! samtools quickcheck -v "$MERGE_TMP"; then
+        echo "Error: the merged Uncalled4 BAM is truncated or malformed: $MERGE_TMP" >&2
+        echo "       The per-pod5 BAMs in $UC4_DIR are untouched; fix the cause and" >&2
+        echo "       rerun with the same -o to resume at the merge." >&2
+        exit 1
+    fi
+    mv "$MERGE_TMP" "$OUTPUT"
     restore_rg_header "$FILTERED" "$OUTPUT" "$TMP_DIR"
     samtools index "$OUTPUT"
     echo ""

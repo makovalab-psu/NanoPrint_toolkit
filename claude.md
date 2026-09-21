@@ -1422,10 +1422,33 @@ Guards, following the `has_mod_tags` pattern (`has_barcode_tags` in `bin/nanopri
 **Step 4 merge hit the open-file limit, and the EXIT trap deleted ~1.5 days of Uncalled4 output (js4022, full run, Sep 2026).**
 - Uncalled4 finished all 1690 pod5s (1608 had reads). Then `samtools cat -b <1608 BAMs> | samtools sort` failed with `Too many open files`, because `samtools cat` opens every input at once and hermes' soft `ulimit -n` is 1024. This is the same limit as Bug 1 above, now in the merge instead of the split.
 - The per-pod5 BAMs lived in `TMP_DIR/uc4/`, so the EXIT trap deleted them. `_filtered.bam` (`--keep-all`) survived, so only step 4 had to be redone.
-- **Fix 1, the merge:** raise the soft limit to the hard limit (`ulimit -n "$(ulimit -Hn)"`). If the input count still exceeds limit − 64, `samtools cat` in batches into `TMP_DIR/cat_batches/`, then cat the batches. The batch path needs ~1× the Uncalled4 output in extra disk.
+- **Fix 1, the merge:** raise the soft limit to the hard limit (`ulimit -n "$(ulimit -Hn)"`). If the input count still exceeds limit − 64, merge in batches into `TMP_DIR/merge_batches/` first. The batch path needs ~1× the Uncalled4 output in extra disk. (Originally `samtools cat` in batches; see the next entry for why it is `samtools merge` now.)
 - **Fix 2, resume per pod5:** the per-pod5 BAMs now go to `<out_dir>/<stem>_uc4_parts/`, outside `TMP_DIR`, whatever the `--keep-*` flags.
   - uncalled4 writes into `partial/`, and the BAM is `mv`'d up a level only when finished, so a pod5 is done only if `<stem>_uc4.bam` exists.
   - Pod5s with no reads after filtering are listed in `no_reads.txt`.
   - A rerun with the same `-o` drops the done pod5s' reads in the split pass and aligns only the rest. If all are done, the fn-sort and split are skipped.
   - The folder is removed after the final BAM is indexed.
 - Tested locally with a fake `uncalled4`: 310 pod5s (300 with reads), `ulimit -n 200`, killed after 150 pod5s. The rerun resumed 154 done, aligned 151 (149 + 151 = 300), batched the merge in 3 × ≤136, and gave 900/900 reads with no duplicates. It also passed with a soft limit of 200 raised to a hard limit of 1024 (no batching).
+
+**Then the merge filled the disk: `samtools cat | samtools sort` needs ~2× the output in scratch (js4022, Sep 2026).**
+The rerun with the fixes above got through all 1690 pod5s and died again in the merge:
+
+```
+samtools sort: failed writing to "…/js4022_all_uncalled4.bam": Illegal seek
+```
+
+- **"Illegal seek" is not a seek problem.** `samtools sort` prints `strerror(errno)` when the output write fails, and with `-@ 30` the errno it picks up is often stale. The real cause was ENOSPC. Two tells: the truncated output was **exactly 85,784 MiB** (a failed buffer flush lands on a round boundary; a normal BAM does not), and `/storage` could not have held what the command asked for — 263 GB of parts + ~250 GB of sort spill (`[bam_sort_core] merging from 20 files`) + a ~263 GB output + 222 GB of `--keep-all` intermediates against 837 GB free. It stopped 90 GB into the output, right where the space ran out.
+- **Fix: `samtools merge` instead of `samtools cat | samtools sort`.** Merging already-sorted inputs streams straight to a sorted output with **no temp spill**, so the peak is parts + output instead of parts + spill + output.
+  - **Each part is sorted when it is written** (`samtools sort` into `partial/`, then `mv` up), not all at once at the end. uncalled4 writes records in signal-processing order while inheriting the input's `SO:coordinate` header — **the part headers lie**, which is why the old code re-sorted everything. Sorting ~100 MB per pod5 costs nothing next to DTW.
+  - Parts left by an older version are sorted once at merge time; `sorted.txt` in the parts folder records which are done, so a rerun does not redo them.
+  - **`samtools merge -c -p` is mandatory.** Every part carries the same 25 `@RG` lines; without `-c`/`-p` samtools *amends* colliding IDs instead of combining them, and the output gets one `@RG` per part (1608 × 25 here), breaking the run_id parsing in `nanoprint demux`.
+- **Disk precheck before the merge:** compares `du -sk` on the parts against `df -Pk` on the output filesystem (2× when batching), and exits with the shortfall named. Discovering it two thirds of the way through writing a 263 GB file is the failure this replaces.
+- **Merge into `<stem>.merge_tmp.bam`, `samtools quickcheck`, then `mv`.** The crash left an 84 GiB truncated BAM at the output path looking finished; nothing downstream would have noticed.
+- Tested locally (samtools 1.20, stub dorado/uncalled4/minimap2 that fail loudly if called) against a rebuilt post-crash state — 12 pod5s, 9 with parts deliberately written in reverse coordinate order under an `SO:coordinate` header, 3 in `no_reads.txt`, plus `_filtered.bam`:
+  - resumes at step 4, 12/12 pod5s already done, sorts the 9 legacy parts, merges;
+  - 72 in = 72 out, no duplicate read names, coordinate order verified, `quickcheck` clean;
+  - **3 `@RG` header lines, not 27** — the `-c -p` check;
+  - `fn`, `BC`, `RG`, `MM`, `ML`, `mv`, `ts`, `qs` all 72/72;
+  - batched path (forced to batches of 3) gives the same 72 records and 3 `@RG`;
+  - parts listed in `sorted.txt` skip the sort pass;
+  - the precheck exits 1 with the parts untouched and no output file written.

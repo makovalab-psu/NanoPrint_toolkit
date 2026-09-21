@@ -144,7 +144,7 @@ looks fine and has no methylation data in it.
 | 1 | Dorado | pod5 → basecalled BAM (with move tables via `--emit-moves`) |
 | 2 | minimap2 | basecalled BAM → aligned BAM (`MM`/`ML` modification calls + move tags preserved via `-T`/`-y`) |
 | 3 | samtools | aligned BAM → filtered BAM (MAPQ ≥ 20, no secondary/supplementary) |
-| 4 | Uncalled4 | filtered BAM split by pod5 source → per-pod5 Uncalled4 BAMs → merged and sorted → **Uncalled4 BAM** |
+| 4 | Uncalled4 | filtered BAM split by pod5 source → per-pod5 Uncalled4 BAMs (each sorted as it is written) → merged → **Uncalled4 BAM** |
 
 **Why step 4 splits by pod5:** If uncalled4 runs against all pod5 files at once on a coordinate-sorted BAM, it must seek randomly across every pod5 file to retrieve each read's raw signal — resulting in severe I/O bottlenecking (observed: 4.6% CPU utilization over 9 days on a 36-thread job). Instead, `nanoprint preprocess`:
 
@@ -154,6 +154,8 @@ looks fine and has no methylation data in it.
 4. Runs uncalled4 on each pod5 independently — each job reads one file sequentially, eliminating random I/O
 
 **Temporary disk usage** during step 4 peaks at approximately **2× the filtered BAM size**: one copy for the fn-sorted intermediate BAM (`fn_sorted.bam` in `-T` temp dir) plus the accumulating split BAMs (deleted progressively as each pod5 batch completes). Make sure the `-T` temp directory has enough space before starting.
+
+**Disk for the final merge:** the per-pod5 Uncalled4 BAMs together are several times the filtered BAM (DTW tags are large — 69 GB became 263 GB in js4022), and the merged output is about the same size again. Each part is coordinate-sorted as it is written, so the merge streams with no temporary spill and needs free space equal to the parts, not double. `preprocess` checks this before merging and stops with the shortfall named rather than filling the filesystem partway through the output.
 
 Intermediate files are cleaned up automatically. The output is two files:
 - `Output_bam_file.bam` — coordinate-sorted Uncalled4 BAM with embedded DTW tags
