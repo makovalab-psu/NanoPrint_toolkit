@@ -3,7 +3,14 @@
 
 
 def get_igv_source_bam(wildcards):
-    """Get the source BAM file for an IGV export rule."""
+    """Get the source BAM file for an IGV export rule.
+
+    A ^u sample has no BAM under data/; the supplied Uncalled4 BAM is the
+    filtered alignment, and rule all asks only for its filtered_alignments
+    export (see igv_sources()).
+    """
+    if wildcards.igv_source == "filtered_alignments" and has_uncalled4(wildcards.raw_sample):
+        return get_uncalled4_bam(wildcards.raw_sample)
     return f"{IGV_SOURCE_DIRS[wildcards.igv_source]}/{wildcards.genome}/{wildcards.raw_sample}.bam"
 
 

@@ -3,9 +3,15 @@
 
 
 def find_perbase_bam(wildcards):
-    """Use Uncalled4 BAM when pod5 input is available; filtered BAM otherwise."""
-    if has_pod5(wildcards.raw_sample):
-        return f"data/uncalled4/{wildcards.genome}/{wildcards.raw_sample}.bam"
+    """Use the Uncalled4 BAM when there is one; the filtered BAM otherwise.
+
+    Three cases, in the order they are tested:
+      ^u sample   the supplied Uncalled4 BAM, read where it lies
+      pod5 sample the Uncalled4 BAM that uncalled4_align produces
+      otherwise   data/filtered_alignments, with no signal data in play
+    """
+    if has_signal(wildcards.raw_sample):
+        return uncalled4_bam(wildcards)
     return f"data/filtered_alignments/{wildcards.genome}/{wildcards.raw_sample}.bam"
 
 

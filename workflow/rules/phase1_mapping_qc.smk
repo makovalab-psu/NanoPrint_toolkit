@@ -2,6 +2,7 @@
 # Rules for mapping, filtering, and QC statistics
 
 import os
+import re
 import glob as pyglob
 
 
@@ -11,6 +12,10 @@ def find_raw_reads(wildcards):
     For pod5 input: dorado_basecall (phase 0) produces data/basecalled/{sample}.bam,
     which is returned here so map_reads depends on it and triggers basecalling.
     For all other input types (fastq.gz, fastq, bam): the path is used directly.
+    A ^u sample lands in that last case, which is what read_stats wants — the
+    supplied Uncalled4 BAM is the only copy of those reads there is. Nothing else
+    in this file applies to ^u samples: map_reads and filter_alignments are never
+    requested for them, and alignment_stats_uncalled4 below replaces alignment_stats.
     """
     raw_sample = wildcards.raw_sample
 
@@ -129,6 +134,43 @@ rule alignment_stats:
             -o {output.table} \
             2>&1 | tee {log}
         """
+
+
+if UNCALLED4_PATHS:
+    # Both rules can produce data/filtered_alignments/{genome}/{raw_sample}_stats.txt.
+    # For a ^u sample only this one is correct; the wildcard constraint keeps it
+    # away from every other sample, and ruleorder settles the overlap.
+    ruleorder: alignment_stats_uncalled4 > alignment_stats
+
+    rule alignment_stats_uncalled4:
+        """Alignment statistics for an input supplied already Uncalled4-aligned (^u).
+
+        There is no pre-filter BAM to compare against — those reads were dropped
+        before Uncalled4 ran — so the Raw_alignment column reads NA and only the
+        filtered stats are produced. They are written into
+        data/filtered_alignments/{genome}/ even though the BAM itself lives
+        elsewhere, because that is where the histograms rule reads them from.
+        """
+        input:
+            bam=lambda wildcards: get_uncalled4_bam(wildcards.raw_sample)
+        output:
+            filtered_flagstats="data/filtered_alignments/{genome}/{raw_sample}_flagstats.txt",
+            filtered_stats="data/filtered_alignments/{genome}/{raw_sample}_stats.txt",
+            table="tables/alignment_stats/{genome}/{raw_sample}.txt"
+        log:
+            "logs/alignment_stats/{genome}/{raw_sample}.log"
+        benchmark:
+            "benchmarks/phase1/alignment_stats/{genome}/{raw_sample}.tsv"
+        wildcard_constraints:
+            raw_sample="|".join(re.escape(s) for s in sorted(UNCALLED4_PATHS))
+        shell:
+            """
+            workflow/scripts/Alignment_stats.sh \
+                -f {input.bam} \
+                -d data/filtered_alignments/{wildcards.genome} \
+                -o {output.table} \
+                2>&1 | tee {log}
+            """
 
 
 rule histograms:

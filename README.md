@@ -163,12 +163,21 @@ Intermediate files are cleaned up automatically. The output is two files:
 
 ## Continuing the pipeline on ROAR
 
-Transfer both output files to ROAR, then point the `^r` line in CONFIG at the Uncalled4 BAM as if it were a standard pre-aligned BAM. The pipeline will use the Uncalled4 BAM for per-base error (Phase 2) and signal deviation (Phase 2b) without re-running Phase 0.
+Transfer both output files to ROAR (the `.bai` too — it is needed and not rebuilt), then declare the relationship with **`^u`** instead of `^r`.
 
 ```
-# CONFIG on ROAR — use the transferred Uncalled4 BAM directly
-^r  MySample  /path/to/Output_bam_file.bam  /path/to/Control_uncalled4.bam
+# CONFIG on ROAR — inputs that are already Uncalled4-aligned
+#^u  Sample    Treatment                        Control
+^u   MySample  /path/to/Output_bam_file.bam     /path/to/Control_uncalled4.bam
 ```
+
+`^u` takes the same three fields as `^r`. What differs is where the DAG starts: for a `^u` sample nothing is basecalled, mapped, filtered or signal-aligned, and the supplied BAM is read where it lies by per-base error (phase 2) and by `uncalled4 convert` for signal deviation (phase 2b). Both tracks then flow on through reactivity and the bigWig outputs exactly as for a pod5 sample.
+
+**Use `^r`, not `^u`, for an ordinary aligned BAM.** A `^r` BAM is re-mapped through `samtools fastq | minimap2`, which keeps only the tags on the `Map_reads.sh` allowlist and would drop Uncalled4's DTW tags — the whole reason the signal alignment was run. That re-mapping is what `^u` avoids.
+
+What a `^u` sample does *not* produce, because the reads it would need no longer exist: the `aligned_reads` (pre-filter) copies of the alignment statistics, histograms and IGV exports. The supplied BAM counts as the filtered alignment — it is one, being MAPQ-filtered with no secondary or supplementary records — so the `filtered_alignments` versions of all three are produced as usual, and `tables/alignment_stats_table.csv` carries `NA` in the `Not_filtered` row for these samples.
+
+Mixing is fine: a CONFIG can hold `^r` and `^u` relationships side by side, and each sample follows its own route through the workflow.
 
 ## Dependencies
 
@@ -228,9 +237,10 @@ Tested on dorado 1.3.2 + uncalled4 4.1.0 with SQK-RBK114-24 (js4022):
 ### Description
 Oxford Nanopore sequencing reads for treatment and control samples. Treatment samples are typically treated with a chemical probe (e.g., permanganate) while control samples are untreated.
 
-The pipeline auto-detects the input format at runtime — no CONFIG flag required:
-- **FASTQ/BAM mode**: standard basecalled reads; produces the standard per-base error track only
-- **Pod5 mode**: raw signal files; triggers Phase 0 (Dorado basecalling + Uncalled4 signal alignment) and adds a parallel per-base signal deviation track alongside the standard error track
+How an input enters the workflow is decided by its CONFIG prefix, and within `^r` the format is auto-detected at runtime:
+- **FASTQ/BAM mode** (`^r`): standard basecalled reads; produces the standard per-base error track only
+- **Pod5 mode** (`^r`): raw signal files; triggers Phase 0 (Dorado basecalling + Uncalled4 signal alignment) and adds a parallel per-base signal deviation track alongside the standard error track
+- **Uncalled4 mode** (`^u`): a BAM that has already been through `uncalled4 align`; phases 0 and 1 do not run, and both tracks are produced from the DTW tags the BAM already carries
 
 ### Format
 Standard FASTQ (gzipped), unaligned BAM, or raw Oxford Nanopore pod5 files.
@@ -253,6 +263,9 @@ Supported input formats and how to specify them:
 | Unaligned BAM | `/path/to/{sample}.bam` | Standard error track |
 | Pod5 directory | `/path/to/pod5/run/` (searched recursively) | Pod5 mode — adds signal track |
 | Single pod5 file | `/path/to/{sample}.pod5` | Pod5 mode — adds signal track |
+| Uncalled4 BAM (on a `^u` line) | `/path/to/{sample}.bam` (`.bai` alongside) | Uncalled4 mode — signal track, phases 0–1 skipped |
+
+An Uncalled4 BAM must go on a `^u` line. On an `^r` line it is treated as ordinary aligned reads and re-mapped through `samtools fastq | minimap2`, which drops the DTW tags.
 
 The raw_sample name used throughout the pipeline is derived from the path basename minus extension (e.g., `/runs/Sample01.bam` → `Sample01`). If two paths from different `^r` lines would produce the same name, CONFIG.sh exits with an error listing the conflicting paths.
 
@@ -867,6 +880,7 @@ The wildcard variables are assigned designated as:
 ^w The window files you want in the windows bed files
 ^s The significance threshold for identifying reactive nucleotides (0 = all data, no threshold; 1–4 = p-value cutoffs; multiple lines allowed; level 0 does not produce density files)
 ^r The relationship between sequencing reads. Treatment and control fields are absolute (or relative) paths to the input file or directory. The raw_sample name is derived from the path basename minus extension.
+^u The same three fields as ^r, for inputs that are **already Uncalled4-aligned** (`nanoprint preprocess` output, or `uncalled4 align` run by hand). The DAG starts after signal alignment: no basecalling, mapping, filtering or `uncalled4 align`. See "Continuing the pipeline on ROAR".
 ^t Directories containing temporary files (auto-deleted after use)
 ^igv-bam Generate strand-split BAMs and indices for IGV visualization (flag, no value)
 ^igv-bigwig Generate coverage bigWig files for each strand-split BAM (flag, no value)
@@ -2554,6 +2568,17 @@ The pipeline detects pod5 input automatically at Snakemake run time via the `has
 3. Otherwise → standard FASTQ/BAM mode
 
 No CONFIG flag is needed. The `find_raw_reads()` function in phase 1 returns `data/basecalled/{sample}.bam` when pod5 is detected, causing Snakemake to add `dorado_basecall` as an upstream dependency automatically.
+
+A `^u` sample is not detected but declared: CONFIG.sh writes it into the `UNCALLED4_PATHS` dict, and `has_uncalled4()` reads that. The helpers in the same file follow from it:
+
+| Helper | Meaning |
+|---|---|
+| `has_pod5(s)` | raw signal is available to basecall and align |
+| `has_uncalled4(s)` | an Uncalled4 BAM was supplied via `^u` |
+| `has_signal(s)` | either of the above — the test phases 2b/3b/4b need |
+| `uncalled4_bam(wc)` | the supplied path for a `^u` sample, otherwise `data/uncalled4/{genome}/{raw_sample}.bam` |
+
+Returning the supplied path verbatim is what makes the DAG start after signal alignment: `data/uncalled4/...` is never requested for that sample, so Snakemake never instantiates `uncalled4_align`, and nothing upstream of it either.
 
 ### Signal Analysis Data Flow
 

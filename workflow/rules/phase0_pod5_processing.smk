@@ -2,10 +2,23 @@
 # Dorado basecalling and Uncalled4 signal alignment.
 # Rules here only execute when pod5 input is detected for a sample.
 #
-# has_pod5() and get_pod5_dir() are defined here so they are available
-# to all later phases (this file is included first).
+# A sample enters the workflow in one of three ways, decided by its CONFIG line:
+#   ^r + pod5 path   basecall -> map -> filter -> uncalled4 align (phase 0 + 1)
+#   ^r + reads/BAM   map -> filter (phase 1); no signal data, so no phase 2b/3b/4b
+#   ^u + BAM         already Uncalled4-aligned; phases 0 and 1 do not run at all
+#
+# has_pod5(), has_uncalled4(), has_signal() and the path helpers are defined here
+# so they are available to all later phases (this file is included first).
 
 import os
+
+
+# A Snakefile generated before ^u existed does not define UNCALLED4_PATHS. Such a
+# workflow has no ^u samples by definition, so an empty mapping is the right answer
+# and the old Snakefile keeps working instead of dying on a NameError several
+# includes later.
+if "UNCALLED4_PATHS" not in globals():
+    UNCALLED4_PATHS = {}
 
 
 def get_pod5_dir(raw_sample):
@@ -48,6 +61,60 @@ def pod5_input(raw_sample):
     non-pod5 sample: the rule is not applicable and must never run.
     """
     return get_pod5_dir(raw_sample) or []
+
+
+def get_uncalled4_bam(raw_sample):
+    """Return the supplied Uncalled4 BAM for a sample (^u in CONFIG), or None.
+
+    UNCALLED4_PATHS is written by CONFIG.sh, which has already checked that the
+    path ends in .bam, that the sample is not also declared by ^r, and that an
+    index exists next to it.
+    """
+    return UNCALLED4_PATHS.get(raw_sample)
+
+
+def has_uncalled4(raw_sample):
+    """Return True if this sample was supplied already Uncalled4-aligned."""
+    return get_uncalled4_bam(raw_sample) is not None
+
+
+def has_signal(raw_sample):
+    """Return True if DTW signal data is or will be available for this sample.
+
+    Either there is pod5 to align (^r) or an Uncalled4 BAM was supplied (^u).
+    This is what phases 2b/3b/4b need; they read DTW tags, not raw signal, so a
+    supplied BAM serves them exactly as a freshly aligned one does.
+    """
+    return has_pod5(raw_sample) or has_uncalled4(raw_sample)
+
+
+def uncalled4_bam(wildcards):
+    """The Uncalled4 BAM for a sample: supplied by ^u, or built by uncalled4_align.
+
+    Returning the supplied path verbatim is what makes the DAG start after signal
+    alignment — nothing upstream of it is ever requested, so no rule that would
+    rebuild it is instantiated.
+    """
+    supplied = get_uncalled4_bam(wildcards.raw_sample)
+    if supplied:
+        return supplied
+    return f"data/uncalled4/{wildcards.genome}/{wildcards.raw_sample}.bam"
+
+
+def uncalled4_bai(wildcards):
+    """Index of the Uncalled4 BAM; alongside the BAM in both cases."""
+    return uncalled4_bam(wildcards) + ".bai"
+
+
+def igv_sources(raw_sample):
+    """IGV export sources applicable to a sample.
+
+    A ^u sample has no pre-filter BAM — those reads were dropped before Uncalled4
+    ran — so only the filtered_alignments export exists for it.
+    """
+    if has_uncalled4(raw_sample):
+        return ["filtered_alignments"]
+    return IGV_SOURCES
 
 
 rule dorado_basecall:
@@ -119,10 +186,12 @@ rule uncalled4_convert_tsv:
     Note the flag is --ref, not the --ref-index named in uncalled4's own error.
     dtw.model_diff = observed - model current, in normalized (not pA) units;
     consumed by perbase_signal_deviation.py.
+    The BAM comes from uncalled4_align for a pod5 sample, or straight from the
+    ^u path for a sample supplied already signal-aligned.
     """
     input:
-        bam="data/uncalled4/{genome}/{raw_sample}.bam",
-        bai="data/uncalled4/{genome}/{raw_sample}.bam.bai",
+        bam=uncalled4_bam,
+        bai=uncalled4_bai,
         genome="resources/genomes/{genome}.fa"
     output:
         tsv="data/uncalled4_tsv/{genome}/{raw_sample}_{strand}.tsv"

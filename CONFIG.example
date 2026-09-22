@@ -27,6 +27,13 @@
 # Pod5 example:
 #^r	Hsap_HG002_LCL	/sequencer/output/run_Mn04/pod5_pass	/sequencer/output/run_CTRL/pod5_pass
 
+#Relationships whose inputs are ALREADY Uncalled4-aligned (nanoprint preprocess output).
+# Same three fields as ^r. The DAG starts after signal alignment: no basecalling,
+# no mapping, no filtering, no uncalled4 align. Keep the .bai next to each BAM.
+# Do not put these BAMs on an ^r line — they would be re-mapped and lose their DTW tags.
+#^    Sample          Treatment                          Control
+#^u	Hsap_HG002_LCL	/path/to/Mn04_uncalled4.bam	/path/to/CTRL_uncalled4.bam
+
 # Temporary intermediate files (deleted after downstream rules complete)
 # Remove these lines to keep all intermediate files
 ^t	data/aligned_reads

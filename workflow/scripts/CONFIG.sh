@@ -54,6 +54,11 @@ declare -a CONTROLS=()
 declare -a TREATMENT_PATHS=()
 declare -a CONTROL_PATHS=()
 declare -a TEMP_DIRS=()
+# Raw sample names declared by ^r (raw reads / pod5) and by ^u (already Uncalled4
+# aligned). A name in both is contradictory and is rejected below.
+declare -a R_KEYS=()
+declare -a U_KEYS=()
+declare -a U_VALS=()
 IGV_BAM="false"
 IGV_BIGWIG="false"
 # Exact model with CpG 5mC/5hmC calling built in, named as `dorado download --list`
@@ -156,6 +161,28 @@ while IFS= read -r line || [[ -n "$line" ]]; do
                 CONTROLS+=("$control")
                 TREATMENT_PATHS+=("${treatment_raw%/}")
                 CONTROL_PATHS+=("${control_raw%/}")
+                R_KEYS+=("$treatment" "$control")
+                ;;
+            "^u")
+                # Relationship whose treatment and control inputs are ALREADY
+                # Uncalled4-aligned BAMs (nanoprint preprocess output, or
+                # uncalled4 align run by hand). Same three fields as ^r; what
+                # differs is where the DAG starts. These samples are never
+                # basecalled, mapped, filtered or signal-aligned: the supplied
+                # BAM is read directly by perbase_error and uncalled4_convert_tsv,
+                # and counts as the filtered alignment for QC.
+                sample=$(echo "$values" | cut -f1)
+                treatment_raw=$(echo "$values" | cut -f2)
+                control_raw=$(echo "$values" | cut -f3)
+                treatment=$(strip_ext "$(basename "${treatment_raw%/}")")
+                control=$(strip_ext "$(basename "${control_raw%/}")")
+                SAMPLES+=("$sample")
+                TREATMENTS+=("$treatment")
+                CONTROLS+=("$control")
+                TREATMENT_PATHS+=("${treatment_raw%/}")
+                CONTROL_PATHS+=("${control_raw%/}")
+                U_KEYS+=("$treatment" "$control")
+                U_VALS+=("${treatment_raw%/}" "${control_raw%/}")
                 ;;
             "^t")
                 # Temporary directory pattern
@@ -228,6 +255,62 @@ for k in "${UNIQUE_PATH_KEYS[@]+"${UNIQUE_PATH_KEYS[@]}"}"; do
 done
 # Keep sorted for deterministic Snakefile output
 RAW_SAMPLES=($(printf '%s\n' "${RAW_SAMPLES[@]}" | sort -u))
+
+# ============================================================================
+# ^u inputs: already Uncalled4-aligned BAMs
+# ============================================================================
+# Deduplicate (a control shared by two relationships appears on two ^u lines),
+# then check each one. Paths that differ under the same name are already caught
+# by the collision check above, which sees ^r and ^u paths alike.
+declare -a UNIQUE_U_KEYS=()
+declare -a UNIQUE_U_VALS=()
+for i in "${!U_KEYS[@]}"; do
+    found="false"
+    for k in "${UNIQUE_U_KEYS[@]+"${UNIQUE_U_KEYS[@]}"}"; do
+        [[ "$k" == "${U_KEYS[$i]}" ]] && { found="true"; break; }
+    done
+    if [[ "$found" == "false" ]]; then
+        UNIQUE_U_KEYS+=("${U_KEYS[$i]}")
+        UNIQUE_U_VALS+=("${U_VALS[$i]}")
+    fi
+done
+
+for i in "${!UNIQUE_U_KEYS[@]}"; do
+    u_name="${UNIQUE_U_KEYS[$i]}"
+    u_path="${UNIQUE_U_VALS[$i]}"
+
+    # One sample cannot both be produced by the pipeline and supplied to it.
+    for r in "${R_KEYS[@]+"${R_KEYS[@]}"}"; do
+        if [[ "$r" == "$u_name" ]]; then
+            echo "Error: sample '$u_name' is declared on both a ^r and a ^u line." >&2
+            echo "  ^r means 'basecall/map/filter/signal-align this input'." >&2
+            echo "  ^u means 'this input is already Uncalled4-aligned'." >&2
+            echo "  Use one or the other for a given input." >&2
+            exit 1
+        fi
+    done
+
+    # The whole point of ^u is that the file carries Uncalled4's DTW tags, so it
+    # has to be a BAM. A pod5 path or FASTQ here would fail much later, inside
+    # perbase_error or uncalled4 convert.
+    if [[ "$u_path" != *.bam ]]; then
+        echo "Error: ^u input for '$u_name' is not a .bam file: $u_path" >&2
+        echo "  ^u takes an Uncalled4-aligned BAM (nanoprint preprocess output)." >&2
+        echo "  Use ^r for pod5 directories, FASTQ or unaligned BAM input." >&2
+        exit 1
+    fi
+
+    if [[ ! -f "$u_path" ]]; then
+        # Not fatal: the Snakefile is often generated before the data is staged.
+        # Snakemake reports it as a missing input file when the run starts.
+        echo "Warning: ^u BAM not found (needed when the workflow runs): $u_path" >&2
+    elif [[ ! -f "${u_path}.bai" && ! -f "${u_path%.bam}.bai" ]]; then
+        # uncalled4_convert_tsv needs the index, and it is cheap to make now
+        # rather than to discover missing mid-run (same reasoning as faidx below).
+        echo "Indexing ^u BAM: $u_path"
+        samtools index "$u_path"
+    fi
+done
 
 # ============================================================================
 # Extract chromosomes from genome .fai files
@@ -400,6 +483,17 @@ EOF
     done
     echo "}"
     echo ""
+    echo "# Inputs supplied already Uncalled4-aligned (^u): raw_sample -> BAM path"
+    echo "# For these samples the DAG starts after signal alignment: no dorado,"
+    echo "# no minimap2, no filter_alignments, no uncalled4 align. The BAM is read"
+    echo "# directly by perbase_error and uncalled4_convert_tsv, and stands in for"
+    echo "# the filtered alignment in QC (it is one: MAPQ-filtered, no secondary)."
+    echo "UNCALLED4_PATHS = {"
+    for i in "${!UNIQUE_U_KEYS[@]}"; do
+        echo "    \"${UNIQUE_U_KEYS[$i]}\": \"${UNIQUE_U_VALS[$i]}\","
+    done
+    echo "}"
+    echo ""
     echo "# Sample names (from relationships)"
     echo "SAMPLES = $(python_list "${SAMPLES[@]}")"
     echo ""
@@ -559,15 +653,22 @@ rule all:
                genome=GENOMES, feature=FEATURES, sample=SAMPLES, strand=STRANDS),
 
         # Phase 6: IGV strand-split BAMs + indices
-        expand("results/igv/{igv_source}/{genome}/{raw_sample}_{strand}.bam",
-               igv_source=IGV_SOURCES, genome=GENOMES, raw_sample=RAW_SAMPLES, strand=STRANDS) +
-        expand("results/igv/{igv_source}/{genome}/{raw_sample}_{strand}.bam.bai",
-               igv_source=IGV_SOURCES, genome=GENOMES, raw_sample=RAW_SAMPLES, strand=STRANDS)
+        # igv_sources() drops the pre-filter export for ^u samples, which have no
+        # pre-filter BAM.
+        [f"results/igv/{src}/{genome}/{rs}_{strand}.{ext}"
+         for genome in GENOMES
+         for rs in RAW_SAMPLES
+         for src in igv_sources(rs)
+         for strand in STRANDS
+         for ext in ("bam", "bam.bai")]
         if IGV_BAM else [],
 
         # Phase 6: IGV coverage bigWig files
-        expand("results/igv/{igv_source}/{genome}/{raw_sample}_{strand}.bw",
-               igv_source=IGV_SOURCES, genome=GENOMES, raw_sample=RAW_SAMPLES, strand=STRANDS)
+        [f"results/igv/{src}/{genome}/{rs}_{strand}.bw"
+         for genome in GENOMES
+         for rs in RAW_SAMPLES
+         for src in igv_sources(rs)
+         for strand in STRANDS]
         if IGV_BIGWIG else [],
 
         # Phase 7: Read statistics table
@@ -577,9 +678,13 @@ rule all:
         "tables/alignment_stats_table.csv",
 
         # Phase 7: Summary histograms (raw and filtered alignments, per genome per sample)
-        expand("plots/histograms/{alignment}/{genome}/{raw_sample}_histograms.pdf",
-               alignment=["aligned_reads", "filtered_alignments"],
-               genome=GENOMES, raw_sample=RAW_SAMPLES),
+        # A ^u sample gets the filtered set only: its supplied BAM is the filtered
+        # alignment, and the pre-filter reads no longer exist.
+        [f"plots/histograms/{alignment}/{genome}/{rs}_histograms.pdf"
+         for genome in GENOMES
+         for rs in RAW_SAMPLES
+         for alignment in (["filtered_alignments"] if has_uncalled4(rs)
+                           else ["aligned_reads", "filtered_alignments"])],
 
         # Phase 7: Pairwise per-base error correlation tables and heatmaps (per genome)
         expand("tables/perbase_error_correlation/{genome}/Pairwise_correlation_table.csv",
@@ -592,28 +697,30 @@ rule all:
                genome=GENOMES, feature=FEATURES, sample=SAMPLES)
         if FEATURES else [],
 
-        # Phase 2b: Per-base signal deviation (only for samples with pod5 input)
+        # Phase 2b: Per-base signal deviation (samples that have DTW signal data:
+        # pod5 to align via ^r, or an Uncalled4 BAM supplied via ^u)
         [f"data/perbase_signal/{genome}/{rs}_{strand}.txt.gz"
          for genome in GENOMES
          for rs in RAW_SAMPLES
          for strand in STRANDS
-         if has_pod5(rs)],
+         if has_signal(rs)],
 
-        # Phase 3b: Signal reactivity bigWig files (only for samples with pod5 input)
+        # Phase 3b: Signal reactivity bigWig files (both sides must have signal data)
         [f"data/signal_bw_merged/{genome}/significance_threshold_{sig}/{sample}_{strand}.bw"
          for genome in GENOMES
          for sig in SIG_LEVELS
          for sample in SAMPLES
          for strand in STRANDS
-         if has_pod5(get_treatment(sample)) and has_pod5(get_control(sample))],
+         if has_signal(get_treatment(sample)) and has_signal(get_control(sample))],
 
-        # Phase 4b: Mean signal reactivity bigWig (only when pod5 + mean windows configured)
+        # Phase 4b: Mean signal reactivity bigWig (signal data + mean windows configured)
         [f"data/signal_bw_mean_merged/{genome}/window_size_{mean_size}/{sample}_{strand}.bw"
          for genome in GENOMES
          for mean_size in MEAN_WINDOW_SIZES
          for sample in SAMPLES
          for strand in STRANDS
-         if MEAN_WINDOW_SIZES and has_pod5(get_treatment(sample)) and has_pod5(get_control(sample))],
+         if MEAN_WINDOW_SIZES and has_signal(get_treatment(sample))
+         and has_signal(get_control(sample))],
 
 EOF
 
@@ -754,5 +861,11 @@ echo ""
 echo "Dorado model (for pod5 inputs): $DORADO_MODEL"
 echo "Raw input paths:"
 for i in "${!UNIQUE_PATH_KEYS[@]}"; do
-    echo "  ${UNIQUE_PATH_KEYS[$i]}: ${UNIQUE_PATH_VALS[$i]}"
+    # Say which inputs skip phases 0 and 1, so a misplaced ^r or ^u is visible
+    # here rather than in a surprise basecalling job.
+    marker=""
+    for u in "${UNIQUE_U_KEYS[@]+"${UNIQUE_U_KEYS[@]}"}"; do
+        [[ "$u" == "${UNIQUE_PATH_KEYS[$i]}" ]] && { marker="   [^u: already Uncalled4-aligned]"; break; }
+    done
+    echo "  ${UNIQUE_PATH_KEYS[$i]}: ${UNIQUE_PATH_VALS[$i]}${marker}"
 done
