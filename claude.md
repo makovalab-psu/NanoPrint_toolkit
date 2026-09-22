@@ -640,6 +640,7 @@ Add `^t` prefix lines to mark directories as temporary:
 | Key | Directory | Rule(s) |
 |-----|-----------|---------|
 | `aligned_reads_bam` | `data/aligned_reads` | `map_reads` |
+| `uncalled4_tsv` | `data/uncalled4_tsv` | `uncalled4_convert_tsv` |
 | `perbase_error_by_chr` | `data/perbase_error_by_chr` | `split_perbase_by_chr` |
 | `reactivity` | `data/reactivity` | `calculate_reactivity` |
 | `bg` | `data/bg` | `reactivity_to_bedgraph` |
@@ -1524,3 +1525,62 @@ snakemake 9.23.1 dry run):
 - Really executed (samtools only): `read_stats`, `perbase_error`, `alignment_stats_uncalled4`,
   `histograms`, `alignment_stats_table` — the aggregate CSV carries one all-`NA`
   `Not_filtered` row and one real `Filtered` row per `^u` sample.
+
+### perbase_signal_deviation.py: chunked, and the DTW TSV is now deletable (js4022, Sep 2026)
+
+`pd.read_csv(<whole TSV>)` was only ever viable on small data. The TSV `uncalled4 convert`
+writes holds **one row per aligned base per read**, so it scales with depth x genome, not
+with genome. js4022 (4.2 Mb at ~1000x per strand) is ~9.5e9 rows, ~570 GB, for one sample
+strand — the load would OOM long before the disk filled, and on Roar Collab memory is the
+scarce resource (~8 GB per core), not disk.
+
+**Two passes, bounded memory.**
+
+1. Stream the TSV line by line; bin every observation into a fixed-width genome window
+   (`-w`, default 10 kb) under a temp directory beside the output. Rows buffer in
+   `array.array` (12 bytes: int32 position + float64 value) and flush in batches
+   (`--buffer-rows`, default 20M ≈ 240 MB). Binary, so the temp files are about a fifth
+   of the text TSV.
+2. Read back one window at a time, `np.lexsort` by (position, value), and compute that
+   window's statistics as index arithmetic on contiguous runs: `np.add.reduceat` for the
+   sums, and a vectorised order-statistic interpolation for the four quantiles.
+
+Peak memory is the busiest single window — coverage x window size x 12 bytes — plus the
+buffer. Windows are cut on genome coordinates, so every observation at a position lands in
+the same window and `-w` changes only the peak, never the result.
+
+Measured on a 10M-row TSV (macOS, `/usr/bin/time -l`):
+
+| | Peak RSS | Wall |
+|---|---|---|
+| old (pandas, whole file) | 1.89 GB | 80 s |
+| new, defaults | 254 MB | 9.2 s |
+| new, `--buffer-rows 2000000 -w 2000` | 142 MB | 9.4 s |
+
+It is also faster, because the old groupby computed quantiles through Python lambdas.
+
+**Agreement with the old implementation** on the same inputs: identical positions,
+nucleotides, coverage, quantiles and mean-squared deviation. The mean column differs by at
+most 1 ulp of the printed value (1e-6) on ~0.4% of positions, from summation order —
+pandas sums in row order with compensation, this sums value-sorted runs.
+
+Two details worth keeping:
+
+- **Quantile interpolation must mirror numpy's `_lerp`**, which switches from
+  `a + t*(b - a)` to `b - (b - a)*(1 - t)` once `t >= 0.5`. The naive form alone disagrees
+  at ~1e-6, which is enough to move the last printed digit.
+- **The old script crashed on a short malformed line** — pandas' `on_bad_lines="warn"`
+  does not cover a row with *fewer* fields than the header; it pads with NaN, and the
+  wrong field lands in `pos` (`ValueError: invalid literal for int() with base 10: 'is'`).
+  The new pass 1 compares the field count against the header and skips, counting the
+  skips. Those malformed rows are a known uncalled4 quirk (js4007), so this was a real bug.
+
+**`data/uncalled4_tsv` is now a temp-able output.** `TEMP_OUTPUTS` gained an
+`uncalled4_tsv` key and `uncalled4_convert_tsv` wraps its output in `wrap_output()`, so
+`^t data/uncalled4_tsv` in CONFIG makes Snakemake delete each TSV as soon as
+`perbase_signal_deviation` has consumed it. Without that line the TSVs are kept, which is
+what you want only if you plan to run `uncalled4 convert` output through something else.
+
+**Still unresolved: `uncalled4 convert` itself.** On a 50 kb slice of a js4022 sample it
+was OOM-killed on a Roar Collab submit node. Nothing here changes convert's own memory
+use; that needs measuring inside a job with a known `--mem`, not on a login node.

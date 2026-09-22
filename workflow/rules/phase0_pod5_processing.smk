@@ -194,7 +194,12 @@ rule uncalled4_convert_tsv:
         bai=uncalled4_bai,
         genome="resources/genomes/{genome}.fa"
     output:
-        tsv="data/uncalled4_tsv/{genome}/{raw_sample}_{strand}.tsv"
+        # One row per aligned base per read, so this is the largest file the workflow
+        # writes — roughly 60 bytes x the sample's aligned bases (js4022: ~570 GB for
+        # one sample strand). Add "^t data/uncalled4_tsv" to CONFIG and Snakemake
+        # deletes each one as soon as perbase_signal_deviation has consumed it.
+        tsv=wrap_output("uncalled4_tsv",
+                        "data/uncalled4_tsv/{genome}/{raw_sample}_{strand}.tsv")
     log:
         "logs/uncalled4_convert_tsv/{genome}/{raw_sample}_{strand}.log"
     benchmark:

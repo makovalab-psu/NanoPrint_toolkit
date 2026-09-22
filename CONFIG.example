@@ -37,6 +37,10 @@
 # Temporary intermediate files (deleted after downstream rules complete)
 # Remove these lines to keep all intermediate files
 ^t	data/aligned_reads
+# The Uncalled4 DTW TSVs are one row per aligned base per read - by far the
+# largest thing the workflow writes. Marked temporary, each is deleted as soon
+# as perbase_signal_deviation has consumed it.
+^t	data/uncalled4_tsv
 ^t	data/bg
 ^t	data/bw
 ^t	data/windows

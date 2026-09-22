@@ -534,6 +534,7 @@ EOF
     echo "# Mapping of output keys to whether they should be temporary"
     echo "TEMP_OUTPUTS = {"
     echo "    \"aligned_reads_bam\": \"data/aligned_reads\" in TEMP_DIRS,"
+    echo "    \"uncalled4_tsv\": \"data/uncalled4_tsv\" in TEMP_DIRS,"
     echo "    \"perbase_error_by_chr\": \"data/perbase_error_by_chr\" in TEMP_DIRS,"
     echo "    \"reactivity\": \"data/reactivity\" in TEMP_DIRS,"
     echo "    \"bg\": \"data/bg\" in TEMP_DIRS,"

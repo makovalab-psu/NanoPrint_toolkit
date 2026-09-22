@@ -1500,7 +1500,9 @@ Example:
 - `data/perbase_signal/{genome}/{sample}_{strand}.txt.gz`
 
 **Dependencies:**
-- python3, pandas, pysam (fallback only)
+- python3, numpy, pysam (fallback only)
+
+**Memory:** the input TSV holds one row per aligned base per read, so it is routinely larger than RAM (js4022: ~570 GB for one sample strand at 2000x over 4.2 Mb). The script never loads it. Pass 1 streams the TSV and bins each observation into a fixed-width genome window (`-w`, default 10 kb) under a temp directory; pass 2 loads one window at a time and computes that window's statistics with numpy. Peak memory is the busiest window — coverage x window size x 12 bytes — plus the pass 1 buffer (`--buffer-rows`). Measured on a 10M-row TSV: 254 MB peak and 9 s, against 1.9 GB and 80 s for the previous pandas version. Lower `-w` for deeper data or a tighter limit; windows are cut on genome coordinates, so every observation at a position stays in one window and the result does not change.
 
 **Documentation:**
 
@@ -1516,6 +1518,10 @@ Required arguments:
 
 Optional arguments:
     -c    Minimum coverage to emit a position (default: 1)
+    -w    Genome window size in nt for binning (default: 10000). Sets peak memory.
+    --buffer-rows   Rows buffered before flushing to window files (default: 20000000)
+    --tmp-dir       Where the per-window temp files go (default: beside the output).
+                    Needs roughly a fifth of the input TSV; binary, not text.
 
 Input TSV columns (subset used):
     dtw.model_diff    Model current - observed current (pA); the signal deviation metric
@@ -1539,6 +1545,9 @@ Notes:
     - dtw.model_diff = observed - model (positive = observed current higher than expected)
     - Positions where DTW failed (marked '*' in TSV) are excluded (read as NaN)
     - Handles uncalled4 version differences in column naming automatically
+    - Rows whose field count does not match the header are skipped and counted
+    - Quantiles use linear interpolation between order statistics, matching
+      numpy.percentile and pandas.Series.quantile defaults
 
 Example:
     perbase_signal_deviation.py -i data/uncalled4_tsv/genome/Sample01_for.tsv \
