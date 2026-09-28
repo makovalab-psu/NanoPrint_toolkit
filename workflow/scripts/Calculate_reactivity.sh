@@ -30,7 +30,8 @@ Optional arguments:
     -c    Minimum coverage threshold (default: 10)
     -f    Column number to use as the value metric (default: 5)
           Use 5 for mean per-base error or mean signal deviation.
-          Use 10 for mean squared signal deviation (pA^2).
+          Use 10 for mean squared signal deviation (normalized^2, not pA^2 —
+          dtw.model_diff is in normalized units).
     -T    Temporary directory (default: same directory as output)
     -h    Show this help message
 

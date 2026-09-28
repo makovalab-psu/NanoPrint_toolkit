@@ -1576,7 +1576,7 @@ Example:
 **Documentation:**
 
 ```
-Usage: Calculate_reactivity.sh -p <MnO4.txt.gz> -m <CTRL.txt.gz> -o <output.txt.gz> [-c threshold] [-T tmpdir]
+Usage: Calculate_reactivity.sh -p <MnO4.txt.gz> -m <CTRL.txt.gz> -o <output.txt.gz> [-c threshold] [-f field] [-T tmpdir]
 
 Calculate reactivity from perbase error (treatment minus control).
 
@@ -1587,15 +1587,19 @@ Required arguments:
 
 Optional arguments:
     -c    Minimum coverage threshold (default: 10)
+    -f    Column number to use as the value metric (default: 5)
+          Use 5 for mean per-base error or mean signal deviation.
+          Use 10 for mean squared signal deviation (normalized^2, not pA^2 —
+          dtw.model_diff is in normalized units).
     -T    Temporary directory (default: same directory as output)
     -h    Show this help message
 
-Input format (5 columns, tab-separated):
+Input format (tab-separated; only columns 1-4 and -f are used):
     1. Chromosome name
     2. Position (1-based)
     3. Nucleotide identity
     4. Coverage
-    5. Perbase error
+    5. Value metric (or whichever column is specified with -f)
 
 Output format (4 columns, tab-separated):
     1. Chromosome name

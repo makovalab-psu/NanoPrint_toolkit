@@ -1,7 +1,9 @@
 # Phase 2b: Per-Base Pore Model Signal Deviation
 # Only active when pod5 input is available (Uncalled4 TSV exists).
-# Produces files in the same 5-column format as perbase_error so downstream
-# phases can reuse Calculate_reactivity.sh and all phase 4 scripts.
+# Produces a 10-column file: columns 1-5 match perbase_error (chr, pos, nt, cov,
+# mean), followed by four quantiles and the mean squared deviation. Downstream
+# phases still reuse Calculate_reactivity.sh and all phase 4 scripts unchanged,
+# because those select the value column with -f; phase 3b passes -f 10.
 #
 # Input: strand-specific TSV from uncalled4_convert_tsv (phase 0).
 # Produced by converting the Uncalled4 BAM (no re-alignment); pre-filtered
@@ -14,7 +16,9 @@
 rule perbase_signal_deviation:
     """Compute per-base pore model signal deviation from Uncalled4 DTW TSV.
     Parses dtw.model_diff (observed - expected pore model current) per reference
-    position and outputs the 5-column format (chr, pos, nt, cov, mean_deviation).
+    position and writes 10 columns: chr, pos, nt, cov, mean_deviation, then the
+    Q25/Q75/Q025/Q975 quantiles and the mean squared deviation (column 10, the
+    column phase 3b selects with -f 10).
     """
     input:
         tsv="data/uncalled4_tsv/{genome}/{raw_sample}_{strand}.tsv",

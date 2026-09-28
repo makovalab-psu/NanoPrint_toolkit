@@ -121,9 +121,12 @@ are skipped entirely for them (see the `^u` dev note at the end of this file).
 ### Phase 2b: Per-base Signal Deviation (new, Jun 2026)
 - Only active when pod5 input is available (Uncalled4 TSV exists)
 - `perbase_signal_deviation`: parses `dtw.model_diff` from the Uncalled4 TSV, groups by (chr, pos),
-  computes mean deviation per position, looks up nucleotide from reference FASTA
+  computes mean deviation, four quantiles and mean squared deviation per position,
+  looks up nucleotide from reference FASTA
 - Input TSV is strand-specific (pre-filtered before Uncalled4 ran in `uncalled4_convert_tsv`)
-- Output: `data/perbase_signal/{genome}/{sample}_{strand}.txt.gz` (same 5-col format as perbase_error)
+- Output: `data/perbase_signal/{genome}/{sample}_{strand}.txt.gz` — 10 columns: columns 1-5
+  match perbase_error (chr, pos, nt, cov, mean), then Q25, Q75, Q025, Q975, and
+  mean(dtw.model_diff^2) in column 10 (normalized^2)
 - Split by chromosome: `data/perbase_signal_by_chr/` (via `split_signal_by_chr_{genome}` rules)
 
 ### Phase 3: Reactivity (Step 9)
@@ -132,7 +135,8 @@ are skipped entirely for them (see the `^u` dev note at the end of this file).
 
 ### Phase 3b: Signal Reactivity (new, Jun 2026)
 - Calculate signal reactivity: treatment_deviation - control_deviation
-- Reuses `Calculate_reactivity.sh` (same 5-col input format)
+- Reuses `Calculate_reactivity.sh`, called with `-f 10` to select the mean squared deviation
+  column from the 10-column perbase_signal format (phase 3 uses the default `-f 5`)
 - Output: `data/signal_reactivity/{genome}/{sample}_{strand}_{chr}.txt.gz`
 
 ### Phase 4: Output Formats (Steps 10-14)
@@ -1584,3 +1588,19 @@ what you want only if you plan to run `uncalled4 convert` output through somethi
 **Still unresolved: `uncalled4 convert` itself.** On a 50 kb slice of a js4022 sample it
 was OOM-killed on a Roar Collab submit node. Nothing here changes convert's own memory
 use; that needs measuring inside a job with a known `--mem`, not on a login node.
+
+### `rule all` reached signal reactivity only through the bigWigs (js4022, Sep 2026)
+
+`data/reactivity/{genome}/{sample}_{strand}_{chr}.txt.gz` has always been a direct
+target of `rule all`. Its signal counterpart was not: phases 3b/4b entered only via
+`data/signal_bw_merged/.../significance_threshold_{sig}/...`, which expands over
+`SIG_LEVELS`. A CONFIG with no `^s` line therefore builds `data/reactivity` and
+`data/perbase_signal` but **silently no `data/signal_reactivity`** — the branch
+disappears with no error, because nothing asked for it. js4022 hit exactly that after
+dropping `^s`, `^w` and `^a` from its CONFIG to skip the bigWig and density outputs:
+156 jobs, no `calculate_signal_reactivity`, no `split_signal_by_chr`.
+
+`rule all` now lists the per-chromosome signal reactivity files directly, mirroring
+phase 3 and gated on `has_signal()` for both sides of the relationship. Same CONFIG:
+176 jobs, with `calculate_signal_reactivity` (8) and `split_signal_by_chr` (12) back.
+Significance levels are a phase 4 concern and no longer decide whether phase 3b runs.

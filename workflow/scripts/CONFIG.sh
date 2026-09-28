@@ -635,6 +635,18 @@ rule all:
          for strand in STRANDS
          for chr in CHROMOSOMES[genome]],
 
+        # Phase 3b: Signal reactivity files (per chromosome), for relationships whose
+        # treatment and control both have signal data.
+        # Requested directly, exactly like the phase 3 files above. Reaching them only
+        # through the signal bigWigs meant the whole signal-reactivity branch silently
+        # disappeared from a CONFIG with no ^s line, while data/reactivity still built.
+        [f"data/signal_reactivity/{genome}/{sample}_{strand}_{chr}.txt.gz"
+         for genome in GENOMES
+         for sample in SAMPLES
+         for strand in STRANDS
+         for chr in CHROMOSOMES[genome]
+         if has_signal(get_treatment(sample)) and has_signal(get_control(sample))],
+
         # Phase 4: Merged bigWig files
         expand("data/bw_merged/{genome}/significance_threshold_{sig}/{sample}_{strand}.bw",
                genome=GENOMES, sig=SIG_LEVELS, sample=SAMPLES, strand=STRANDS),
