@@ -1066,6 +1066,34 @@ Example:
 
 **Description:** Convert an Uncalled4 BAM to a strand-specific DTW TSV without re-running signal alignment. Pre-filters to one strand via `samtools view`, then calls `uncalled4 convert`. Run once per strand (for and rev) after `uncalled4_align`.
 
+> **This rule is kept for small datasets, and nothing in the workflow depends on it.**
+> `perbase_signal_deviation` reads the Uncalled4 BAM directly, so the DTW TSV is no
+> longer an intermediate on the way to the signal tracks: it is an optional,
+> user-requested output for inspecting per-read DTW values, feeding an external tool,
+> debugging a locus, or producing a test oracle for the BAM-reading path.
+>
+> Because nothing consumes it, `^t data/uncalled4_tsv` no longer causes auto-deletion —
+> a temp output is removed once its consumers finish, and here there are none. A TSV you
+> ask for is a TSV you keep.
+>
+> The rule is still a normal part of the DAG, so ask Snakemake for the files by name:
+>
+> ```bash
+> # one sample, one strand
+> snakemake --cores 4 data/uncalled4_tsv/{genome}/{sample}_for.tsv
+>
+> # a whole sample, both strands
+> snakemake --cores 8 data/uncalled4_tsv/{genome}/{sample}_{for,rev}.tsv
+> ```
+>
+> **Check the size before you ask for it.** The TSV holds one row per aligned base per read,
+> so it scales with depth x genome, not with genome: roughly `aligned_bases x 60 bytes`.
+> A few hundred megabases of alignment is fine; a WGS sample at 1000x is hundreds of GB
+> (js4022 measured 308 GB for a single sample strand). For a locus, pass a region to
+> `uncalled4 convert` with `-R` rather than converting the whole BAM. If you do request
+> these files on a large dataset, add `^t data/uncalled4_tsv` to CONFIG so each one is
+> deleted as soon as it has been consumed.
+
 **Script:** `workflow/scripts/Uncalled4_convert_tsv.sh`
 
 **Inputs:**
@@ -1488,51 +1516,50 @@ Example:
 
 ## 2b. perbase_signal_deviation (pod5 mode)
 
-**Description:** Compute per-base pore model signal deviation from an Uncalled4 DTW TSV. Groups per-read DTW measurements by reference position and computes multiple statistics from `dtw.model_diff` (observed − model current, normalized units). The 10-column output includes mean deviation, quantiles, and mean squared deviation (normalized²). The mean squared deviation (column 10) is used as the signal metric for Phase 3b reactivity calculation.
+**Description:** Compute per-base pore model signal deviation **directly from the Uncalled4 BAM**. Groups per-read DTW measurements by reference position and computes multiple statistics from `dtw.model_diff` (observed − model current, normalized units). The 10-column output includes mean deviation, quantiles, and mean squared deviation (normalized²). The mean squared deviation (column 10) is used as the signal metric for Phase 3b reactivity calculation.
 
 **Script:** `workflow/scripts/perbase_signal_deviation.py`
 
 **Inputs:**
-- `data/uncalled4_tsv/{genome}/{sample}_{strand}.tsv` (strand-specific TSV from `uncalled4_convert_tsv`)
-- `resources/genomes/{genome}.fa` (fallback for nucleotide lookup if dtw.base absent)
+- The Uncalled4 BAM + `.bai` — built by `uncalled4_align`, or supplied verbatim by a `^u` CONFIG line
+- `resources/genomes/{genome}.fa` (passed to uncalled4 as `--ref`, and used for nucleotide identity)
 
 **Outputs:**
 - `data/perbase_signal/{genome}/{sample}_{strand}.txt.gz`
 
 **Dependencies:**
-- python3, numpy, pysam (fallback only)
+- python3, numpy, pysam, **uncalled4**
 
-**Memory:** the input TSV holds one row per aligned base per read, so it is routinely larger than RAM (js4022: ~570 GB for one sample strand at 2000x over 4.2 Mb). The script never loads it. Pass 1 streams the TSV and bins each observation into a fixed-width genome window (`-w`, default 10 kb) under a temp directory; pass 2 loads one window at a time and computes that window's statistics with numpy. Peak memory is the busiest window — coverage x window size x 12 bytes — plus the pass 1 buffer (`--buffer-rows`). Measured on a 10M-row TSV: 254 MB peak and 9 s, against 1.9 GB and 80 s for the previous pandas version. Lower `-w` for deeper data or a tighter limit; windows are cut on genome coordinates, so every observation at a position stays in one window and the result does not change.
+**Why uncalled4 and not our own tag parsing:** the DTW tags are easy to read, but turning them into genome coordinates is not. `Sequence()` shifts the `ur` bounds by `model.PRMS.shift` at the start and `k-shift-1` at the end, **swaps those two for a reverse-strand read**, and places reverse-strand coordinates in negative `mpos` space where `pos = -mpos-1` (`src/cpp/seq.hpp:270-306`, `src/uncalled4/pore_model.py:519-527`). Getting it wrong shifts every reactivity value by a few bases while the track still looks entirely plausible. The script calls `Tracks` / `sam_to_aln()` and skips only uncalled4's pandas/TSV layer, so the coordinate maths stays uncalled4's.
+
+**Memory and disk:** one streaming pass over the coordinate-sorted BAM. Each read's observations are binned into fixed-width genome windows (`-w`, default 10 kb), and a window is finalised as soon as no later read can reach it — reads arrive sorted by start, so window *w* is done once a read starts at or past its end. **Nothing is written to disk.** Peak memory is the windows currently open: window size x per-strand coverage x 12 bytes, ~120 MB at 10 kb and 1000x. Lower `-w` for deeper data; windows are cut on genome coordinates, so every observation at a position stays in one window and the result cannot change. Arriving below the watermark (an unsorted BAM) is a hard error, not a warning — a track quietly missing a slice of its data looks normal downstream.
+
+For comparison, the path this replaced wrote a ~570 GB TSV per sample strand, a strand-filtered copy of the BAM, and its own binary window files.
 
 **Documentation:**
 
 ```
-Usage: perbase_signal_deviation.py -i <dtw.tsv> -g <genome.fa> -o <output.txt.gz>
+Usage: perbase_signal_deviation.py -i <uncalled4.bam> -g <genome.fa> -s <for|rev> \
+           -o <output.txt.gz> [--window 10000] [-c MIN_COV]
 
-Compute per-base pore model signal deviation from an Uncalled4 DTW TSV.
+Compute per-base pore model signal deviation from an Uncalled4 BAM.
 
 Required arguments:
-    -i    Input Uncalled4 DTW TSV (strand-filtered; produced by uncalled4_convert_tsv)
-    -g    Reference genome FASTA (fallback for nucleotide lookup if dtw.base absent)
+    -i    Input Uncalled4 BAM (coordinate-sorted and indexed)
+    -g    Reference genome FASTA. Passed to uncalled4 as --ref (needed for the pore
+          model k-mer behind dtw.model_diff) and used for nucleotide identity.
+    -s    Strand: for or rev. Replaces the samtools pre-filter the convert-based
+          rule needed — reads are filtered in memory.
     -o    Output file (.txt.gz)
 
 Optional arguments:
     -c    Minimum coverage to emit a position (default: 1)
-    -w    Genome window size in nt for binning (default: 10000). Sets peak memory.
-    --buffer-rows   Rows buffered before flushing to window files (default: 20000000)
-    --tmp-dir       Where the per-window temp files go (default: beside the output).
-                    Needs roughly a fifth of the input TSV; binary, not text.
-
-Input TSV columns (subset used):
-    dtw.model_diff    Model current - observed current (pA); the signal deviation metric
-    dtw.base          Reference base (letter or integer; handled automatically)
-    ref / seq_name    Chromosome name (column name varies by uncalled4 version)
-    pos / seq_pos     0-based reference position (converted to 1-based in output)
+    -w    Genome window size in nt (default: 10000). Sets peak memory.
 
 Output format (tab-delimited, gzipped):
     Column 1:  Chromosome name
     Column 2:  Position (1-based)
-    Column 3:  Nucleotide (from dtw.base; pysam FASTA as fallback)
+    Column 3:  Nucleotide (pysam FASTA lookup)
     Column 4:  Coverage (reads at this position)
     Column 5:  Mean signal deviation (mean dtw.model_diff, normalized units)
     Column 6:  Q25  — 0.25 quantile of dtw.model_diff (lower 50% CI bound, normalized)
@@ -1543,15 +1570,17 @@ Output format (tab-delimited, gzipped):
 
 Notes:
     - dtw.model_diff = observed - model (positive = observed current higher than expected)
-    - Positions where DTW failed (marked '*' in TSV) are excluded (read as NaN)
-    - Handles uncalled4 version differences in column naming automatically
-    - Rows whose field count does not match the header are skipped and counted
+    - Positions where DTW failed are excluded (uncalled4 reports them as NaN)
+    - Coordinates and model_diff come from uncalled4's decoder, never from our own
+      reading of the ur/ul/uc tags
+    - A BAM that is not coordinate-sorted is refused, not silently mis-binned
     - Quantiles use linear interpolation between order statistics, matching
       numpy.percentile and pandas.Series.quantile defaults
 
 Example:
-    perbase_signal_deviation.py -i data/uncalled4_tsv/genome/Sample01_for.tsv \
-        -g resources/genomes/genome.fa -o data/perbase_signal/genome/Sample01_for.txt.gz
+    perbase_signal_deviation.py -i data/uncalled4/genome/Sample01.bam \
+        -g resources/genomes/genome.fa -s for \
+        -o data/perbase_signal/genome/Sample01_for.txt.gz
 ```
 
 ---

@@ -118,12 +118,13 @@ are skipped entirely for them (see the `^u` dev note at the end of this file).
 - Split files by chromosome (for parallelization)
 - Correlate per-base error between samples via random subsampling
 
-### Phase 2b: Per-base Signal Deviation (new, Jun 2026)
-- Only active when pod5 input is available (Uncalled4 TSV exists)
-- `perbase_signal_deviation`: parses `dtw.model_diff` from the Uncalled4 TSV, groups by (chr, pos),
-  computes mean deviation, four quantiles and mean squared deviation per position,
-  looks up nucleotide from reference FASTA
-- Input TSV is strand-specific (pre-filtered before Uncalled4 ran in `uncalled4_convert_tsv`)
+### Phase 2b: Per-base Signal Deviation (new, Jun 2026; BAM-direct since Sep 2026)
+- Active when `has_signal()` — pod5 (`^r`) or a supplied Uncalled4 BAM (`^u`)
+- `perbase_signal_deviation`: reads `dtw.model_diff` straight out of the Uncalled4 BAM via
+  uncalled4's own decoder, groups by (chr, pos), computes mean deviation, four quantiles and
+  mean squared deviation per position, looks up nucleotide from reference FASTA
+- Strand is selected in memory with `-s for|rev`; no strand-filtered BAM copy, no TSV
+- `uncalled4_convert_tsv` is no longer on this path (see the dev note at the end of this file)
 - Output: `data/perbase_signal/{genome}/{sample}_{strand}.txt.gz` — 10 columns: columns 1-5
   match perbase_error (chr, pos, nt, cov, mean), then Q25, Q75, Q025, Q975, and
   mean(dtw.model_diff^2) in column 10 (normalized^2)
@@ -1604,3 +1605,86 @@ dropping `^s`, `^w` and `^a` from its CONFIG to skip the bigWig and density outp
 phase 3 and gated on `has_signal()` for both sides of the relationship. Same CONFIG:
 176 jobs, with `calculate_signal_reactivity` (8) and `split_signal_by_chr` (12) back.
 Significance levels are a phase 4 concern and no longer decide whether phase 3b runs.
+
+
+### perbase_signal_deviation reads the Uncalled4 BAM directly (js4022, Sep 2026)
+
+`uncalled4 convert` was the whole cost of the signal branch. Its TSV holds one row per
+aligned base per read — ~570 GB for one js4022 sample strand — and `io/tsv.py:30` appends
+`seq.kmer` to whatever `--tsv-cols` asks for, on top of `seq.name`, `seq.pos`, `seq.strand`
+and `aln.id`, so every row spends ~65 bytes of text to deliver five numbers. Worse, on ROAR
+(2026-09-22) `convert_pool` took both job slots, was OOM-killed *inside* — 74 oom_kill
+events — **without failing the snakemake job**, and burned a 48 h allocation with
+`perbase_error` never starting. The pool is the cause: `iter_str_chunks` batches 500
+alignments (`params.py:19`), each worker returns a list of CSV strings, and both the input
+chunks and the output buffers queue in the parent.
+
+**None of that is needed.** The DTW payload is already in the BAM (`ur ul uc ud un`), and
+`sam_to_aln()` decodes it without touching a pod5 — `read_index[query_name]` returns None
+with `load_signal=False`, and only a record *without* DTW tags needs a read object.
+
+`perbase_signal_deviation.py` now calls `Tracks(conf)` with `conf.tracks.io.bam_in`,
+`conf.tracks.ref` and `conf.tracks.layers = ["dtw"]`, iterates `bam_in.iter_sam()`,
+filters on `sam.is_reverse` **before** decoding, and calls
+`bam_in.sam_to_aln(sam, load_moves=False)`. It takes `aln.seq.pos` and
+`aln.dtw.model_diff` as numpy arrays and skips uncalled4's pandas/TSV layer entirely.
+
+**Use uncalled4's decoder, not our own tag parsing.** Reading `ur`/`ul`/`uc` is easy;
+turning them into genome coordinates is not. `Sequence()` shifts the `ur` bounds by
+`model.PRMS.shift` at the start and `k-shift-1` at the end, **swaps those two for a
+reverse-strand read**, and puts reverse-strand coordinates in negative `mpos` space where
+`pos = -mpos-1` (`src/cpp/seq.hpp:270-306`, `pore_model.py:519-527`). A hand-rolled parser
+that gets this wrong shifts every reactivity value by a few bases and still looks
+plausible. It is visible in real output: the js4028 mtDNA oracle starts at position 7 on
+the forward strand and 5 on the reverse.
+
+**Streaming, one pass, no disk.** The BAM is coordinate-sorted, so observations arrive in
+genome order. Each read's `(pos, deviation)` pairs are binned into `-w` windows, and a
+window is finalised once a read starts at or past its end. Peak memory is the open windows
+— window x per-strand coverage x 12 bytes, ~120 MB at 10 kb and 1000x. An observation
+arriving below the watermark raises rather than being dropped: a track quietly missing a
+slice of its data looks entirely normal downstream.
+
+**The statistics block is unchanged** (lexsort, `add.reduceat`, `group_quantile` with
+numpy's `_lerp` switch at t>=0.5), so old and new outputs are directly diffable. Verified
+locally on synthetic observation streams fed to both implementations — 5 trials, windows
+1 kb to 100 kb, with `min_cov` filtering, duplicate positions, exact ties and reads
+spanning up to 16 windows: **byte-identical every time**.
+
+**`uncalled4_convert_tsv` stays**, but nothing in the workflow consumes it now. It runs
+only when a TSV is requested by name — small datasets, inspecting a locus (`-R`), or
+producing the oracle that the BAM path is tested against. One consequence worth knowing:
+`^t data/uncalled4_tsv` no longer auto-deletes anything, because a temp output is removed
+when its consumers finish and there are none.
+
+**Test data:** `js4022_.../dtw_signal_calculation_test_data/` — the js4028 mtDNA BAM
+(3,171 reads, chrM, ~250-666x) with its `perbase_signal` output as the oracle, plus nine
+edge-case BAMs from `make_dtw_test_cases.py`. Note that the js4028 BAMs under
+`data/uncalled4/` are **symlinks** into `data/mtDNA/` (the pre-`^u` staging workaround);
+copy from `data/mtDNA/` or use `rsync -L`.
+
+**Result against the mtDNA oracle (2026-09-29): PASSED, and the two do NOT match
+byte-for-byte — by design.** Forward strand: 1,528 reads decoded, 264 positions skipped
+as NaN, 16,560 rows written, peak 2 windows open. Chromosome, position, nucleotide and
+**coverage are identical on every row**, so the decode, the strand filter, the
+coordinate mapping and the NaN handling all agree exactly. The mean and the four
+quantiles differ in the last printed digit on a minority of rows, up to ~2e-6.
+
+**The cause is in `uncalled4 convert`, not in either implementation.**
+`io/tsv.py:67` writes the TSV with `float_format="%.6g"`, so the oracle's statistics
+were computed from `dtw.model_diff` values already rounded to **6 significant digits**.
+The BAM-direct path never serialises, so it keeps the full float64. Six significant
+digits costs up to 5e-6 absolute near 1.2 and 5e-8 near 0.04, which is why the largest
+gap in the mtDNA comparison is at a position whose deviation is -1.2233.
+
+Quantiles drift most because each is an interpolation between two individual
+observations and inherits one value's rounding. The mean averages hundreds of values so
+the errors mostly cancel, and **column 10, the mean squared deviation that phase 3b
+actually consumes, was identical on every row inspected.**
+
+Where they differ, the BAM path is the correct one. Do not "fix" this toward the
+oracle. `compare_to_oracle.py` in the test data directory reports per-column agreement,
+fails loudly on any chr/pos/nt/coverage mismatch (a real decode bug), and with
+`--prove-precision` re-runs the decode applying `%.6g` per observation and requires
+byte-identity with the oracle — turning the diagnosis into a proof rather than an
+argument.

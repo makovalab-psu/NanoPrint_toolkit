@@ -196,8 +196,13 @@ rule uncalled4_convert_tsv:
     output:
         # One row per aligned base per read, so this is the largest file the workflow
         # writes — roughly 60 bytes x the sample's aligned bases (js4022: ~570 GB for
-        # one sample strand). Add "^t data/uncalled4_tsv" to CONFIG and Snakemake
-        # deletes each one as soon as perbase_signal_deviation has consumed it.
+        # one sample strand).
+        # NOTHING IN THE WORKFLOW CONSUMES THIS ANY MORE: perbase_signal_deviation
+        # reads the Uncalled4 BAM directly, so this rule only runs when a TSV is
+        # requested by name (small datasets, test oracles, inspecting a locus).
+        # "^t data/uncalled4_tsv" therefore no longer causes auto-deletion — with no
+        # consumer there is nothing to trigger it. Use -R to limit convert to a
+        # region rather than converting a whole WGS BAM.
         tsv=wrap_output("uncalled4_tsv",
                         "data/uncalled4_tsv/{genome}/{raw_sample}_{strand}.tsv")
     log:
