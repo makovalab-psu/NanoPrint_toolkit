@@ -51,6 +51,34 @@
 ^igv-bam
 ^igv-bigwig
 
+# Direct modification calling by sample comparison (phases 2c/3c).
+# Each read is tested base by base against a k-mer signal model built from the
+# relationship's control; the track is the fraction of reads called modified.
+# One line per backend; both may be given.
+#   uncalled4   signal level from the Uncalled4 BAM (any sample with pod5 or ^u)
+#   remora      signal level from pod5 via the Remora API (pip install ont-remora).
+#               Needs raw signal: the ^r pod5 path, or a ^pod5 line for a ^u sample.
+#^mod-calls	uncalled4
+#^mod-calls	remora
+# Raw signal for a ^u sample (remora backend): raw_sample name, pod5 file or directory.
+#^pod5	Mn04_uncalled4	/sequencer/output/run_Mn04/pod5_pass
+#^pod5	CTRL_uncalled4	/sequencer/output/run_CTRL/pod5_pass
+# K-mer level table for Remora's signal mapping refinement (ONT kmer_models repo).
+# Without it the basecaller's move table is used as-is.
+#^remora-levels	/path/to/kmer_models/dna_r10.4.1_e8.2_400bps/9mer_levels_v1.txt
+# Pooled control model: a name, then two or more raw_sample names (controls). Built
+# in addition to each relationship's own (matched) control model, for every
+# relationship whose control is a member. Comparing the two is the sample-to-sample
+# reproducibility of the canonical signal.
+#^mod-pool	G4_0mM_pool	CTRL_rep1_uncalled4	CTRL_rep2_uncalled4	CTRL_js4001_uncalled4
+# Calling threshold, as --config keys (either or both; comma-separated lists allowed):
+#   mod_pval=0.02   p-value below this (the default)
+#   mod_fpr=0.02    the cutoff this fraction of the held-out control exceeds
+# Outputs are kept apart by threshold: data/mod_reactivity/<backend>/<genome>/p0.02/...
+# and .../fpr0.02/..., then matched/ or <pool name>/.
+# Other --config keys: mod_mad (15), mod_min_kmer_obs (30), mod_fisher_lag (0),
+# mod_max_obs_per_kmer (20000), mod_per_read (False).
+
 # Pod5 / signal analysis settings
 # Uncomment and set when using pod5 raw data as input instead of FASTQ/BAM.
 # Place pod5 files in raw_data/{SampleName}/ (directory, not file).

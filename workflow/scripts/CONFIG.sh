@@ -61,6 +61,18 @@ declare -a U_KEYS=()
 declare -a U_VALS=()
 IGV_BAM="false"
 IGV_BIGWIG="false"
+# Direct modification calling (phases 2c/3c): backends requested by ^mod-calls,
+# raw signal for ^u samples from ^pod5 (the remora backend reads pod5; a ^u line
+# only names a BAM), and an optional k-mer level table for Remora's signal mapping
+# refinement.
+declare -a MOD_BACKENDS=()
+declare -a POD5_KEYS=()
+declare -a POD5_VALS=()
+REMORA_LEVELS=""
+# ^mod-pool: a k-mer model pooled over several controls. Name, then its members
+# (space-separated raw_sample names), in parallel arrays.
+declare -a POOL_NAMES=()
+declare -a POOL_MEMBERS=()
 # Exact model with CpG 5mC/5hmC calling built in, named as `dorado download --list`
 # prints it. The built-in modification is what makes dorado emit MM/ML tags at all;
 # without them no methylation analysis is possible and the expensive basecalling step
@@ -200,6 +212,30 @@ while IFS= read -r line || [[ -n "$line" ]]; do
             "^dorado-model")
                 DORADO_MODEL="$(echo "$values" | cut -f1 | tr -d ' ')"
                 ;;
+            "^mod-calls")
+                # Backend for direct modification calling; one line per backend.
+                value=$(echo "$values" | cut -f1 | tr -d ' ')
+                if [[ "$value" != "uncalled4" && "$value" != "remora" ]]; then
+                    echo "Error: ^mod-calls takes 'uncalled4' or 'remora', got '$value'." >&2
+                    exit 1
+                fi
+                MOD_BACKENDS+=("$value")
+                ;;
+            "^pod5")
+                # Raw signal for a sample: raw_sample name (as derived from its
+                # ^r/^u path), then the pod5 file or directory.
+                POD5_KEYS+=("$(echo "$values" | cut -f1 | tr -d ' ')")
+                value=$(echo "$values" | cut -f2)
+                POD5_VALS+=("${value%/}")
+                ;;
+            "^remora-levels")
+                REMORA_LEVELS="$(echo "$values" | cut -f1)"
+                ;;
+            "^mod-pool")
+                # Pooled control model: pool name, then two or more raw_sample names.
+                POOL_NAMES+=("$(echo "$values" | cut -f1 | tr -d ' ')")
+                POOL_MEMBERS+=("$(echo "$values" | cut -f2- | tr '\t' ' ')")
+                ;;
         esac
     fi
 done < "$CONFIG_FILE"
@@ -311,6 +347,80 @@ for i in "${!UNIQUE_U_KEYS[@]}"; do
         samtools index "$u_path"
     fi
 done
+
+# ============================================================================
+# Direct modification calling: check ^mod-calls / ^pod5 / ^remora-levels
+# ============================================================================
+# Deduplicate backends (two parallel-array passes, as elsewhere: bash 3.2).
+declare -a UNIQUE_MOD_BACKENDS=()
+for b in "${MOD_BACKENDS[@]+"${MOD_BACKENDS[@]}"}"; do
+    found="false"
+    for k in "${UNIQUE_MOD_BACKENDS[@]+"${UNIQUE_MOD_BACKENDS[@]}"}"; do
+        [[ "$k" == "$b" ]] && { found="true"; break; }
+    done
+    if [[ "$found" == "false" ]]; then
+        UNIQUE_MOD_BACKENDS+=("$b")
+    fi
+done
+
+for i in "${!POD5_KEYS[@]}"; do
+    # A ^pod5 line naming no sample would be ignored without a word, and the
+    # remora backend would then skip that sample for want of signal.
+    found="false"
+    for k in "${RAW_SAMPLES[@]+"${RAW_SAMPLES[@]}"}"; do
+        [[ "$k" == "${POD5_KEYS[$i]}" ]] && { found="true"; break; }
+    done
+    if [[ "$found" == "false" ]]; then
+        echo "Error: ^pod5 names '${POD5_KEYS[$i]}', which is not a raw sample." >&2
+        echo "  Raw samples: ${RAW_SAMPLES[*]}" >&2
+        exit 1
+    fi
+    if [[ ! -e "${POD5_VALS[$i]}" ]]; then
+        echo "Warning: ^pod5 path not found (needed when the workflow runs): ${POD5_VALS[$i]}" >&2
+    fi
+done
+
+for i in "${!POOL_NAMES[@]}"; do
+    pool="${POOL_NAMES[$i]}"
+    members=(${POOL_MEMBERS[$i]})
+    if [[ ${#members[@]} -lt 2 ]]; then
+        echo "Error: ^mod-pool '$pool' needs at least two raw samples." >&2
+        exit 1
+    fi
+    if [[ "$pool" == "matched" ]]; then
+        echo "Error: ^mod-pool cannot be named 'matched' (that is the per-relationship model)." >&2
+        exit 1
+    fi
+    # A pool model and a matched model share a directory, named after the pool and
+    # after the control respectively, so the two name spaces must not overlap.
+    for k in "${RAW_SAMPLES[@]+"${RAW_SAMPLES[@]}"}"; do
+        if [[ "$k" == "$pool" ]]; then
+            echo "Error: ^mod-pool name '$pool' is also a raw sample name." >&2
+            exit 1
+        fi
+    done
+    for j in "${!POOL_NAMES[@]}"; do
+        if [[ "$i" -lt "$j" && "${POOL_NAMES[$j]}" == "$pool" ]]; then
+            echo "Error: ^mod-pool '$pool' is declared twice." >&2
+            exit 1
+        fi
+    done
+    for m in "${members[@]}"; do
+        found="false"
+        for k in "${RAW_SAMPLES[@]+"${RAW_SAMPLES[@]}"}"; do
+            [[ "$k" == "$m" ]] && { found="true"; break; }
+        done
+        if [[ "$found" == "false" ]]; then
+            echo "Error: ^mod-pool '$pool' names '$m', which is not a raw sample." >&2
+            echo "  Raw samples: ${RAW_SAMPLES[*]}" >&2
+            exit 1
+        fi
+    done
+done
+
+if [[ -n "$REMORA_LEVELS" && ! -f "$REMORA_LEVELS" ]]; then
+    echo "Warning: ^remora-levels table not found (needed when the workflow runs): $REMORA_LEVELS" >&2
+fi
 
 # ============================================================================
 # Extract chromosomes from genome .fai files
@@ -552,6 +662,23 @@ EOF
     echo "# Dorado basecalling model (used when pod5 input is detected)"
     echo "DORADO_MODEL = \"${DORADO_MODEL}\""
     echo ""
+    echo "# Direct modification calling (phases 2c/3c): backends from ^mod-calls,"
+    echo "# raw signal for the remora backend from ^pod5, level table from ^remora-levels"
+    echo "MOD_BACKENDS = $(python_list "${UNIQUE_MOD_BACKENDS[@]+"${UNIQUE_MOD_BACKENDS[@]}"}")"
+    echo "POD5_PATHS = {"
+    for i in "${!POD5_KEYS[@]}"; do
+        echo "    \"${POD5_KEYS[$i]}\": \"${POD5_VALS[$i]}\","
+    done
+    echo "}"
+    echo "REMORA_LEVELS = \"${REMORA_LEVELS}\""
+    echo "# Pooled control models (^mod-pool): name -> member raw samples"
+    echo "MOD_POOLS = {"
+    for i in "${!POOL_NAMES[@]}"; do
+        members=(${POOL_MEMBERS[$i]})
+        echo "    \"${POOL_NAMES[$i]}\": $(python_list "${members[@]}"),"
+    done
+    echo "}"
+    echo ""
     echo "# IGV export settings"
     if [[ "$IGV_BAM" == "true" ]]; then
         echo "IGV_BAM = True"
@@ -601,8 +728,10 @@ include: "workflow/rules/phase0_pod5_processing.smk"
 include: "workflow/rules/phase1_mapping_qc.smk"
 include: "workflow/rules/phase2_perbase_error.smk"
 include: "workflow/rules/phase2b_signal_deviation.smk"
+include: "workflow/rules/phase2c_mod_calling.smk"
 include: "workflow/rules/phase3_reactivity.smk"
 include: "workflow/rules/phase3b_signal_reactivity.smk"
+include: "workflow/rules/phase3c_mod_reactivity.smk"
 include: "workflow/rules/phase4_analysis.smk"
 include: "workflow/rules/phase4b_signal_analysis.smk"
 include: "workflow/rules/phase5_annotate_features.smk"
@@ -734,6 +863,18 @@ rule all:
          for strand in STRANDS
          if MEAN_WINDOW_SIZES and has_signal(get_treatment(sample))
          and has_signal(get_control(sample))],
+
+        # Phase 3c: Modification-rate reactivity, per ^mod-calls backend, per calling
+        # threshold (mod_pval / mod_fpr) and per control model (matched, plus any
+        # ^mod-pool the control belongs to). Requesting it pulls in the k-mer models
+        # and both sets of calls (phase 2c).
+        [f"data/mod_reactivity/{backend}/{genome}/{thr}/{model_set}/{sample}_{strand}.txt.gz"
+         for backend in MOD_BACKENDS
+         for genome in GENOMES
+         for thr in MOD_THRESHOLDS
+         for sample in mod_relationships(backend)
+         for model_set in mod_model_sets(backend, sample)
+         for strand in STRANDS],
 
 EOF
 
@@ -872,6 +1013,10 @@ else
 fi
 echo ""
 echo "Dorado model (for pod5 inputs): $DORADO_MODEL"
+echo "Modification calling backends: ${UNIQUE_MOD_BACKENDS[*]:-(none)}"
+for i in "${!POOL_NAMES[@]}"; do
+    echo "  pooled control model ${POOL_NAMES[$i]}: ${POOL_MEMBERS[$i]}"
+done
 echo "Raw input paths:"
 for i in "${!UNIQUE_PATH_KEYS[@]}"; do
     # Say which inputs skip phases 0 and 1, so a misplaced ^r or ^u is visible

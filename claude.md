@@ -1854,3 +1854,122 @@ passing a healthy one.
 `js4022_.../20261002_submit_nanoprint.sh` is the hand-written reference implementation
 this was derived from, and additionally carries a disk precheck for the phase 6 split
 BAMs.
+
+### Phases 2c/3c: direct modification calling by sample comparison (js4031, Oct 2026)
+
+A third readout next to per-base error and DTW signal deviation: every read is tested
+base by base against a canonical k-mer signal model built from the relationship's
+control, and the track is the **fraction of reads called modified**. The method is
+Rembo's (P2-seq preprint: per-k-mer n/mean/SD from the untreated sample after a 15-MAD
+filter, restricted to k-mers aligned without mismatch or indel; z-score; two-sided
+Gaussian p; modified at p < 0.02). The test is Tombo's `model_sample_compare`
+(`tombo_stats.py compute_sample_compare_read_stats`), including optional Fisher's-method
+smoothing along the read. Neither tool is a dependency — Tombo cannot read POD5/R10 and
+Remora has no sample-comparison test — the statistics are ported into
+`workflow/scripts/mod_calling_common.py`.
+
+**Enabled by CONFIG, off by default:**
+
+```
+^mod-calls	uncalled4
+^mod-calls	remora
+^pod5	<raw_sample>	/path/to/pod5        # raw signal for a ^u sample (remora only)
+^remora-levels	/path/to/9mer_levels_v1.txt  # optional: Remora signal mapping refinement
+^mod-pool	<name>	<control>	<control> ...    # optional: a model pooled over controls
+```
+
+**Two backends, one test.** Both hand the shared code `(position, level, k-mer)` per read:
+
+| | `uncalled4` | `remora` |
+|---|---|---|
+| Level | `dtw.current` from the Uncalled4 BAM | `trimmean` from `Read.compute_per_base_metric` |
+| Mapping | Uncalled4 DTW | move table, refined against `^remora-levels` if given |
+| K-mer | `seq.kmer` (pore model 9-mer, shift 6) | centred 9-mer (4+1+4), with or without a level table; `--kmer-context` overrides |
+| Needs | `has_signal()` | that, plus pod5 (`^r` path or `^pod5`), `ont-remora`, `pod5` |
+
+The remora backend reads the **Uncalled4 BAM** as its alignment (it keeps `mv`/`ts`), so
+both backends score exactly the same reads. No MD tag is needed: Remora's
+`get_reference_sequence()` wants one and minimap2 is not run with `--MD`, so `ref_seq` is
+filled from the FASTA and `compute_ref_to_signal()` re-run. A model is refused by
+`perbase_mod_calls.py` unless backend, k, k-mer context and level table all match the run
+— levels from the two backends differ in units and in which base they belong to.
+
+**Files:**
+
+```
+data/kmer_model/{backend}/{genome}/{model}.tsv                                      kmer_signal_model
+data/perbase_mod_null/{backend}/{genome}/{member}_vs_{model}_{strand}.hist.tsv      perbase_mod_null (fpr only)
+data/perbase_mod/{backend}/{genome}/{thr}/{raw_sample}_vs_{model}_{strand}.txt.gz   perbase_mod_calls
+data/mod_reactivity/{backend}/{genome}/{thr}/{model_set}/{sample}_{strand}.txt.gz   calculate_mod_reactivity
+```
+
+`{model}` is a control's raw_sample name or a `^mod-pool` name; `{model_set}` is
+`matched` or the pool name; `{thr}` is `p0.02`, `fpr0.02`, … from `mod_pval` / `mod_fpr`.
+
+`perbase_mod` columns: chr, pos, nt, coverage, modified fraction, modified reads, mean z,
+mean |z| (1–5 match perbase_error). `mod_reactivity`: chr, pos, nt, treatment − control
+modified fraction, then both coverages and both fractions. Whole-genome files merged by
+contig and position in `mod_reactivity.py` — no per-chromosome split, so no
+`genome_specific_rules.smk` entry.
+
+**Design decisions worth keeping:**
+
+- **The control is scored on reads the model never saw.** Reads are split in two by
+  `crc32(read name)`: the model takes half A, the control is scored on half B
+  (`--half`), the treatment on all reads. Scoring the control against a model built from
+  the same reads is circular and understates the background.
+- **Matched and pooled control models are built side by side.** `matched` is the
+  relationship's own control. `^mod-pool` builds one model from several controls
+  (`kmer_signal_model.py -i a.bam b.bam …`) for every relationship whose control is a
+  member; members are scored on their held-out half B. Reactivity under the two is the
+  sample-to-sample reproducibility of the canonical signal: a batch offset between
+  controls widens the pooled SD and shifts its mean, so pooled calls lose sensitivity
+  and the control's own modified fraction moves off the threshold. For a direct
+  control-vs-control check, request `data/perbase_mod/…/{thr}/{ctrlB}_vs_{ctrlA}_{strand}.txt.gz`
+  by name — a control that is not in the model is scored on all its reads.
+- **Two ways to set the call threshold, selectable together.** `mod_pval` (default
+  0.02) trusts the Gaussian null. `mod_fpr` takes the cutoff that fraction of the
+  model's held-out control reads exceed: `perbase_mod_null` histograms the statistic
+  (|z|, or −log10 p under Fisher) for each member's half B, both strands, in 0.01 bins,
+  and `perbase_mod_calls.py --fpr F --null-hist …` pools them. One global cutoff, not
+  per position or per k-mer. The histogram records the model path, statistic and Fisher
+  lag and is refused if they differ. Each threshold writes under its own `{thr}/`.
+- **The Remora k-mer is a centred 9-mer.** The R10 pore has two reader heads, so there
+  is no single dominant base; the level table's `determine_dominant_pos` is not used
+  for the context.
+- **Background is ~the p-value threshold, not zero.** A Gaussian null flags 2% of
+  unmodified observations at p < 0.02 by construction. The control's modified fraction
+  measures it; reactivity subtracts it.
+- **The mismatch/indel filter applies to the model only.** A modified base is what makes
+  the basecaller err, so filtering the scored sample would remove the signal. The mask
+  is from CIGAR + query + reference with a ±(k−1) flank, which covers every k-mer that
+  can contain the position whichever base the level is registered to.
+- **On a short reference the "k-mer" model is a per-position model** — a few hundred
+  9-mers, each at one position and strand. Correct there, but not transferable; the
+  k-mer keying is what makes the same code meaningful on a plasmid or genome.
+- **`--max-obs-per-kmer` (20000) is an exact uniform sample**, by random priority, not
+  "the first N" — a coordinate-sorted BAM would otherwise fill each k-mer from one locus.
+- **A requested backend that cannot run prints a WARNING at parse time** naming the
+  relationship, instead of dropping out of the DAG (the js4022 `^s` lesson).
+- Thresholds are `--config` keys: `mod_pval`, `mod_mad`, `mod_min_kmer_obs`,
+  `mod_fisher_lag`, `mod_max_obs_per_kmer`, `mod_per_read` (per-read z/p table, written
+  under `data/perbase_mod_reads/`, untracked).
+
+**Tested / not tested (2026-10-07).** `workflow/tests/test_mod_calling.py` runs the
+shared code and all three scripts on simulated reads through a stand-in source: the
+held-out control comes back at 2.0% modified, planted 60% and 25% sites are recovered,
+a model from the other backend is refused, an fpr of 0.02 on a Gaussian null lands on
+|z| > 2.33 (and above 4 on a t(3) null), and a model pooled over two controls offset by
+a batch effect has the expected mean and widened SD. A snakemake 9.27 dry run with two
+`^u` relationships, `^pod5`, a `^mod-pool` and `mod_fpr=0.02` schedules, per backend,
+3 models, 8 null histograms, 32 call jobs and 16 reactivity jobs.
+**Neither backend has been run on real data** — written without uncalled4, pod5 or
+remora installed. First run, check in this order:
+
+1. uncalled4: `aln.dtw.current` and `aln.seq.kmer` decode with `layers=["dtw"]` and are
+   the same length as `aln.seq.pos` (the script exits if not). No start-up warning about
+   the k-mer encoding.
+2. remora: reads are found in the pod5 (`reads missing from pod5: 0`), `reads failed`
+   is a small minority, and positions line up — a strongly reactive T should sit within
+   a few bases of the same T in the uncalled4 track.
+3. Both: held-out control modified fraction ≈ `mod_pval`; mean z ≈ 0.

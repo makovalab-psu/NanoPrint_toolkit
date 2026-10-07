@@ -24,7 +24,10 @@ dependencies:
   # Python
   - python>=3.8
   - pysam
-  - numpy
+  # numpy<2 is what ont-remora requires (remora backend of ^mod-calls). Nothing in
+  # the toolkit needs numpy 2; pandas is no longer used by any script and is kept
+  # only as a utility, so it does not constrain this.
+  - numpy<2
   - pandas
 
   # Pore model signal alignment (pod5 mode)
@@ -52,6 +55,11 @@ dependencies:
   # processes and whether the output BAM is still growing before concluding it hung.
   # Only POD5 reading is affected — `uncalled4 convert` on an existing Uncalled4 BAM
   # reads DTW tags and never opens a pod5.
+
+  # Direct modification calling, remora backend only (^mod-calls remora):
+  #   pip install ont-remora==3.3.0     # the version the backend was written against
+  # It pulls torch, polars and parasail, and requires numpy<2 (pinned above).
+  # The uncalled4 backend needs nothing beyond uncalled4 itself.
 
   # R and packages
   - r-base
