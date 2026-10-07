@@ -1973,3 +1973,118 @@ remora installed. First run, check in this order:
    is a small minority, and positions line up — a strongly reactive T should sit within
    a few bases of the same T in the uncalled4 track.
 3. Both: held-out control modified fraction ≈ `mod_pval`; mean z ≈ 0.
+
+### TO CHECK: concatemer reads may bias against modified units (js4031, Oct 2026)
+
+**Status: open question, not measured. No code changed.**
+
+Short blunt-ended duplexes ligate to each other during LSK114 library prep, so many
+reads are concatemers of the ~88-nt unit. The reference is one unit long, so minimap2
+reports one **primary** alignment (the best-scoring unit) and the others as
+**supplementary**. `Filter_alignments.sh` is hardcoded to
+`samtools view -q 20 -F 0x100 -F 0x800`, so only the primary survives and Uncalled4
+aligns signal for that one unit.
+
+Measured on `dGd_B-DNA-5mMMnO4_js4021-2` vs `G4_strand` (`samtools flagstat`, aligned BAM):
+
+| | Count |
+|---|---|
+| Reads | 871,786 |
+| Primary mapped | 562,147 (64.5%) |
+| Unmapped | 309,639 (35.5%) |
+| Supplementary | 376,105 — 40% of all aligned units |
+
+**The concern (Jacob):** the primary is the best-scoring unit, and permanganate-modified
+bases cause basecall errors, which lower the alignment score. In a treated sample a
+concatemer's unmodified unit would be kept over its modified one, biasing every track —
+per-base error, DTW signal and modification rate — toward lower reactivity. The control
+is unaffected, so the bias would not cancel in treatment − control.
+
+**Decision:** leave the filter alone. Depth is not the issue (~90k reads per construct
+per strand without the supplementary units), and keeping them risks breaking Uncalled4
+and Remora:
+- minimap2 hard-clips supplementary records by default while the `mv` tag copied onto
+  each record still describes the whole read; `-Y` (soft clip) would be needed in
+  `Map_reads.sh`.
+- Whether `uncalled4 align` correctly handles several alignments of one read is
+  unverified (its source does not filter on the supplementary flag).
+- `RemoraLevels` skips supplementary records, and `^u` handling, QC and the notes
+  above all assume one record per read.
+
+**The check to run, after the js4031 run finishes:** compare per-base error (and
+modified fraction) in a treated sample between
+1. reads with **no** supplementary alignment — single units, no selection possible, and
+2. primaries from reads that **do** have a supplementary alignment (`SA` tag present).
+
+Split the filtered BAM on the `SA` tag (`samtools view -d SA` / `-e '![SA]'`) and run
+`perbase_error.sh` on each half. Do the same split on the matching control as the
+null. If (2) is less reactive than (1) in the treated sample but not in the control,
+the bias is real. Then the options are: restrict the analysis to single-unit reads
+(simple, costs depth), or add an opt-in setting to keep supplementary units (`-Y` in
+mapping, configurable filter flag, and a proof on concatemer reads that each unit's
+signal lands on the right reference positions in both backends).
+
+**Also unexplained: 35.5% of reads do not map.** Likely very short or adapter-only
+reads, possibly the `lr:hq` preset failing to seed on fragments shorter than a unit.
+Look at the length distribution of the unmapped reads (`samtools view -f 4`).
+
+### bigWig steps: "no positions passed the filter" is not an error (js4031, Oct 2026)
+
+`bg_to_bw.sh` exited 1 when no position cleared the significance threshold, which
+stopped the whole js4031 run at 15:13 on 2026-10-07:
+
+```
+Significance level: p < 0.01
+Reactivity threshold: >= 0.0145786
+Error: No positions passed the filter. Cannot create bigWig.
+```
+
+On a genome that never happens — some position always passes. On an 86-nt contig it
+is ordinary, and it is guaranteed for a sample on a reference it does not contain:
+the failing jobs were `dGd_G4-5mMMnO4_js4001-3` on `Reverse_complement` (a G4 library
+has no perfect reverse complement) and on the `rev` strand of `G4_strand` (the same
+missing strand seen from the other reference).
+
+**Fix:** `bg_to_bw.sh` now warns, writes a **0-byte placeholder** and exits 0 — the
+convention `igv_coverage_bigwig` already uses, since `bedGraphToBigWig` cannot write
+an empty bigWig. `Merge_bigwig.sh` skips 0-byte inputs, and writes a 0-byte output
+itself when every chromosome was empty. The warning reports how many positions the
+input held, so "nothing passed" is distinguishable from "nothing was there".
+
+**A second bug this uncovered in `Merge_bigwig.sh`:** `bw_file=$(get_file_for_chr "$chr")`
+under `set -euo pipefail`. The function returns 1 for a chromosome with no input file,
+and a failing command substitution in a plain assignment ends the script immediately
+with no message — the log just stops after "Converting bigWig files...". It had never
+fired because every chromosome always had a file. Now `$(get_file_for_chr "$chr" || true)`.
+
+Tested with the real UCSC tools: nothing passes → 0-byte file, exit 0; one empty + one
+real → merged bigWig holding the real chromosome; all empty → 0-byte output, exit 0;
+all real → unchanged. **A 0-byte `.bw` is not a valid bigWig**: IGV and
+`bigWigToBedGraph` will refuse it, so check file size before loading these tracks.
+
+**Same day, second failure in the same script — the silent one.** The log ended at
+`Parsing significance threshold from header...` with exit 1 and no error text. Cause:
+
+```bash
+THRESHOLD=$(grep "$SIG_PATTERN" "$INPUT" | grep -oE '...' | head -1)
+```
+
+When `react_to_bg.sh` finds no negative reactivity values it has no null distribution,
+so it writes the header `# Reactivity bedGraph - No significance thresholds (null
+distribution empty)` with no `p < ...` lines. `grep` then matches nothing, `pipefail`
+fails the pipeline, and `set -e` ends the script inside the assignment — before the
+"Could not find threshold" message two lines below could ever print. This is the third
+instance of one pattern in this file (`((var++))`, `get_file_for_chr`, now this):
+**under `set -euo pipefail`, a command substitution that can legitimately fail needs
+`|| true`, and the emptiness check after it is what reports the problem.**
+
+Now: `|| true` on the substitution; a bedGraph with the no-thresholds header (or no
+data lines) gets the 0-byte placeholder and a warning; a header that should have had
+the threshold and does not is still a hard error, with the header printed. The number
+pattern was also widened from `[0-9]+\.[0-9e+-]+` to `[0-9][0-9.e+-]*` — the old one
+could not match a threshold R prints as `5e-04` or `0`, which would have hit the same
+silent exit. `react_dens.sh` had the identical line and got the same two changes.
+
+Tested: no-null header with data → placeholder; no data → placeholder; header missing
+only the requested level → exit 1 with message; `5e-04` threshold → parsed, bigWig
+written; the two earlier cases unchanged.

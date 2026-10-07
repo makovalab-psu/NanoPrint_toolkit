@@ -60,6 +60,17 @@ dependencies:
   #   pip install ont-remora==3.3.0     # the version the backend was written against
   # It pulls torch, polars and parasail, and requires numpy<2 (pinned above).
   # The uncalled4 backend needs nothing beyond uncalled4 itself.
+  #
+  # SETUPTOOLS, AFTER ALL OF THE ABOVE (js4031, 2026-10-07, hermes, python 3.12):
+  #   pip install "setuptools>=77.0.3,<81"
+  # Three constraints meet here. uncalled4 needs setuptools==69.5.1 to BUILD. torch
+  # (via ont-remora) upgrades setuptools - to 84 on that day - and requires >=77.0.3.
+  # And uncalled4 at IMPORT pulls in ont_fast5_api, which needs pkg_resources, removed
+  # from setuptools 82: `ModuleNotFoundError: No module named 'pkg_resources'`.
+  # 77.0.3 - 80.x satisfies the last two, and the build pin no longer matters once
+  # uncalled4 is installed. Verified with setuptools 80.10.2, torch 2.14.1, remora
+  # 3.3.0, numpy 1.26.4. Reinstalling uncalled4 means 69.5.1 again, then this range.
+  # The "pkg_resources is deprecated" warning on import is expected.
 
   # R and packages
   - r-base

@@ -134,9 +134,26 @@ else
 
     echo "Parsing significance threshold from header..."
     # Extract threshold value from header
-    THRESHOLD=$(grep "$SIG_PATTERN" "$INPUT" | grep -oE '[0-9]+\.[0-9e+-]+$' | head -1)
+    # '|| true': when grep finds no threshold line the pipeline fails, and under
+    # 'set -euo pipefail' a failing command substitution in an assignment ends the
+    # script right here, before any of the messages below - the log just stops at
+    # "Parsing significance threshold from header...".
+    # The pattern accepts any number format R prints (0.0145786, 5e-04, 0).
+    THRESHOLD=$(grep "$SIG_PATTERN" "$INPUT" | grep -oE '[0-9][0-9.e+-]*$' | head -1 || true)
 
     if [[ -z "$THRESHOLD" ]]; then
+        DATA_COUNT=$(grep -v "^#" "$INPUT" | grep -c -v "^$" || true)
+        if grep -q "No significance thresholds" "$INPUT" || [[ "$DATA_COUNT" -eq 0 ]]; then
+            # react_to_bg.sh writes this header when there are no negative
+            # reactivity values to build a null distribution from (or no data at
+            # all). Without a null there is no threshold, so nothing can be called
+            # significant: same 0-byte placeholder as "no positions passed" below.
+            echo "Warning: $INPUT has no significance thresholds ($DATA_COUNT positions," >&2
+            echo "  no negative reactivity values for a null distribution)." >&2
+            echo "Writing an empty placeholder: $OUTPUT" >&2
+            : > "$OUTPUT"
+            exit 0
+        fi
         echo "Error: Could not find threshold for '$SIG_PATTERN' in header" >&2
         echo "Header contents:" >&2
         head -10 "$INPUT" >&2
@@ -162,8 +179,16 @@ fi
 FILTERED_COUNT=$(wc -l < "$FILTERED_BG" | tr -d ' ')
 
 if [[ "$FILTERED_COUNT" -eq 0 ]]; then
-    echo "Error: No positions passed the filter. Cannot create bigWig." >&2
-    exit 1
+    # Not an error. On a short contig it is ordinary for no position to clear the
+    # significance threshold, and a sample has next to no reads on a reference it
+    # does not contain (js4031: a G4 library on the perfect reverse complement).
+    # bedGraphToBigWig cannot write an empty bigWig, so leave a 0-byte placeholder,
+    # as igv_coverage_bigwig does; Merge_bigwig.sh skips it.
+    INPUT_COUNT=$(grep -v "^#" "$INPUT" | grep -c -v "^$" || true)
+    echo "Warning: none of the $INPUT_COUNT positions in $INPUT passed the filter." >&2
+    echo "Writing an empty placeholder: $OUTPUT" >&2
+    : > "$OUTPUT"
+    exit 0
 fi
 
 # Extract chromosomes from filtered bedGraph
