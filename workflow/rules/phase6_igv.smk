@@ -3,7 +3,14 @@
 
 
 def get_igv_source_bam(wildcards):
-    """Get the source BAM file for an IGV export rule."""
+    """Get the source BAM file for an IGV export rule.
+
+    A ^u sample has no BAM under data/; the supplied Uncalled4 BAM is the
+    filtered alignment, and rule all asks only for its filtered_alignments
+    export (see igv_sources()).
+    """
+    if wildcards.igv_source == "filtered_alignments" and has_uncalled4(wildcards.raw_sample):
+        return get_uncalled4_bam(wildcards.raw_sample)
     return f"{IGV_SOURCE_DIRS[wildcards.igv_source]}/{wildcards.genome}/{wildcards.raw_sample}.bam"
 
 
@@ -67,15 +74,22 @@ rule igv_coverage_bigwig:
         TMP_DIR=$(mktemp -d)
         trap "rm -rf $TMP_DIR" EXIT
 
-        # Check if BAM has any reads
-        if ! samtools view {input.bam} | head -1 | grep -q .; then
+        # Count from the INDEX. Do NOT revert this to `samtools view | head -1`:
+        # under the `set -euo pipefail` snakemake applies, head closes the pipe,
+        # samtools dies of SIGPIPE, and every large BAM is misreported as empty.
+        # See claude.md, "samtools view | head -1 is a silent lie under pipefail".
+        N_READS=$(samtools idxstats {input.bam} | awk '{{n += $3 + $4}} END {{print n + 0}}')
+        if [[ "$N_READS" -eq 0 ]]; then
             echo "No reads in {input.bam} — creating empty bigWig" | tee {log}
             touch {output.bw}
         else
+            echo "Reads in {input.bam}: $N_READS" | tee {log}
             bedtools genomecov -ibam {input.bam} -bg | \
                 sort -k1,1 -k2,2n > "$TMP_DIR/coverage.bg"
             cut -f1,2 {input.fai} > "$TMP_DIR/chrom.sizes"
+            # tee -a, not tee: a second plain `tee {log}` truncates the file and
+            # throws away the read count logged above.
             bedGraphToBigWig "$TMP_DIR/coverage.bg" "$TMP_DIR/chrom.sizes" {output.bw} \
-                2>&1 | tee {log}
+                2>&1 | tee -a {log}
         fi
         """

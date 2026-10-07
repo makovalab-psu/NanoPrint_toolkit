@@ -8,6 +8,12 @@ When raw pod5 files are provided as input, the pipeline additionally runs Dorado
 
 The toolkit is composed of a series of scripts found in workflow/scripts. A user can use the pipeline as intended with Snakemake, or use individual scripts as documented below.
 
+Regression tests for the DTW signal branch live in `workflow/tests/` — see
+`workflow/tests/README.md`. They check `perbase_signal_deviation` against the
+`uncalled4 convert` path it replaced, which is one reason the `uncalled4_convert_tsv`
+rule is kept even though nothing in the workflow consumes it. The test data is ~104 MB
+and is not in this repository; the tests README records where it lives.
+
 ---
 
 # Quick Start: GPU Preprocessing (`nanoprint preprocess`)
@@ -144,7 +150,7 @@ looks fine and has no methylation data in it.
 | 1 | Dorado | pod5 → basecalled BAM (with move tables via `--emit-moves`) |
 | 2 | minimap2 | basecalled BAM → aligned BAM (`MM`/`ML` modification calls + move tags preserved via `-T`/`-y`) |
 | 3 | samtools | aligned BAM → filtered BAM (MAPQ ≥ 20, no secondary/supplementary) |
-| 4 | Uncalled4 | filtered BAM split by pod5 source → per-pod5 Uncalled4 BAMs → merged and sorted → **Uncalled4 BAM** |
+| 4 | Uncalled4 | filtered BAM split by pod5 source → per-pod5 Uncalled4 BAMs (each sorted as it is written) → merged → **Uncalled4 BAM** |
 
 **Why step 4 splits by pod5:** If uncalled4 runs against all pod5 files at once on a coordinate-sorted BAM, it must seek randomly across every pod5 file to retrieve each read's raw signal — resulting in severe I/O bottlenecking (observed: 4.6% CPU utilization over 9 days on a 36-thread job). Instead, `nanoprint preprocess`:
 
@@ -155,18 +161,29 @@ looks fine and has no methylation data in it.
 
 **Temporary disk usage** during step 4 peaks at approximately **2× the filtered BAM size**: one copy for the fn-sorted intermediate BAM (`fn_sorted.bam` in `-T` temp dir) plus the accumulating split BAMs (deleted progressively as each pod5 batch completes). Make sure the `-T` temp directory has enough space before starting.
 
+**Disk for the final merge:** the per-pod5 Uncalled4 BAMs together are several times the filtered BAM (DTW tags are large — 69 GB became 263 GB in js4022), and the merged output is about the same size again. Each part is coordinate-sorted as it is written, so the merge streams with no temporary spill and needs free space equal to the parts, not double. `preprocess` checks this before merging and stops with the shortfall named rather than filling the filesystem partway through the output.
+
 Intermediate files are cleaned up automatically. The output is two files:
 - `Output_bam_file.bam` — coordinate-sorted Uncalled4 BAM with embedded DTW tags
 - `Output_bam_file.bam.bai` — BAM index
 
 ## Continuing the pipeline on ROAR
 
-Transfer both output files to ROAR, then point the `^r` line in CONFIG at the Uncalled4 BAM as if it were a standard pre-aligned BAM. The pipeline will use the Uncalled4 BAM for per-base error (Phase 2) and signal deviation (Phase 2b) without re-running Phase 0.
+Transfer both output files to ROAR (the `.bai` too — it is needed and not rebuilt), then declare the relationship with **`^u`** instead of `^r`.
 
 ```
-# CONFIG on ROAR — use the transferred Uncalled4 BAM directly
-^r  MySample  /path/to/Output_bam_file.bam  /path/to/Control_uncalled4.bam
+# CONFIG on ROAR — inputs that are already Uncalled4-aligned
+#^u  Sample    Treatment                        Control
+^u   MySample  /path/to/Output_bam_file.bam     /path/to/Control_uncalled4.bam
 ```
+
+`^u` takes the same three fields as `^r`. What differs is where the DAG starts: for a `^u` sample nothing is basecalled, mapped, filtered or signal-aligned, and the supplied BAM is read where it lies by per-base error (phase 2) and by `uncalled4 convert` for signal deviation (phase 2b). Both tracks then flow on through reactivity and the bigWig outputs exactly as for a pod5 sample.
+
+**Use `^r`, not `^u`, for an ordinary aligned BAM.** A `^r` BAM is re-mapped through `samtools fastq | minimap2`, which keeps only the tags on the `Map_reads.sh` allowlist and would drop Uncalled4's DTW tags — the whole reason the signal alignment was run. That re-mapping is what `^u` avoids.
+
+What a `^u` sample does *not* produce, because the reads it would need no longer exist: the `aligned_reads` (pre-filter) copies of the alignment statistics, histograms and IGV exports. The supplied BAM counts as the filtered alignment — it is one, being MAPQ-filtered with no secondary or supplementary records — so the `filtered_alignments` versions of all three are produced as usual, and `tables/alignment_stats_table.csv` carries `NA` in the `Not_filtered` row for these samples.
+
+Mixing is fine: a CONFIG can hold `^r` and `^u` relationships side by side, and each sample follows its own route through the workflow.
 
 ## Dependencies
 
@@ -178,6 +195,45 @@ Transfer both output files to ROAR, then point the `^r` line in CONFIG at the Un
 
 See the [Dependencies](#dependencies) section for full installation details, including the critical `pyarrow<20` pin that prevents a deadlock in uncalled4.
 
+## Barcoded runs: `-k` and `nanoprint demux`
+
+For multiplexed libraries, basecall all pod5 files — every barcode, every run, pass and fail — in one `preprocess` job, keep each read's barcode as a tag, and split at the end:
+
+```bash
+nanoprint preprocess -i /path/to/raw_data_dir/ -g genome.fa -o all_uncalled4.bam \
+    -k SQK-RBK114-24 -m 'sup@v5.2.0,4mC_5mC,6mA' -p <threads> --keep-all
+
+nanoprint demux -i all_uncalled4.bam -s samplesheet.tsv -o demux/ -p <threads>
+```
+
+**`-k <kit>`** adds `--kit-name <kit> --no-trim` to dorado:
+- Reads are classified during basecalling and tagged `BC:Z:<kit>_barcodeNN`; unclassified reads have no `BC` tag.
+- All barcodes stay in one BAM. Dorado's `--output-dir` would nest them into folders instead, so it isn't used.
+- Reads are **not trimmed**, so sequence, move table and raw signal stay consistent for Uncalled4. minimap2 soft-clips the barcode and adapter.
+- MinKNOW's own `pod5_pass/barcodeNN` folders come from the live basecaller and are ignored; point `-i` at the whole run directory.
+
+Step 4 writes each pod5's Uncalled4 BAM to `<output_dir>/<output_stem>_uc4_parts/`, outside the temp folder. If the run fails during or after Uncalled4, rerun the same command and only the unfinished pod5 files are aligned again. The folder is removed when the final BAM is indexed.
+
+`BC` and `RG` (run + model + barcode) join the tags `Map_reads.sh` carries through alignment. Its allowlist is now `MM,ML,MN,mv,ts,pi,sp,ns,fn,BC,RG,qs`, and dorado's `@RG` header lines are copied into the aligned BAM. `preprocess` stops with an error if barcode tags are lost at alignment, and preserves the filtered BAM if they are lost at Uncalled4.
+
+**`nanoprint demux`** splits by `BC` using a tab-separated sample sheet (`barcode<TAB>sample`):
+- Barcodes that share a sample name are pooled into one BAM.
+- Reads with no `BC` tag, or a barcode not in the sheet, go to `unclassified.bam`.
+- The split is one streaming `samtools` pass, so every tag (Uncalled4 DTW, `MM`/`ML`, `BC`, `RG`) is kept.
+- Outputs: `<sample>.bam` + `.bai` per sample, `unclassified.bam`, and `demux_counts.tsv` (sample, barcode, run_id, reads, bases). Pooled barcodes and runs therefore stay separable.
+- It exits with an error if output records don't add up to input records.
+
+```
+# samplesheet.tsv — two barcodes pooled into one sample
+barcode01	Bsub_PLBS338_0mMCTRL_js4022
+barcode07	Bsub_PLBS338_0mMCTRL_js4022
+```
+
+Tested on dorado 1.3.2 + uncalled4 4.1.0 with SQK-RBK114-24 (js4022):
+- `--kit-name` keeps `mv`/`ts`.
+- Uncalled4 auto-detects `FLO-PRO114M`/`SQK-RBK114-24` and aligns untrimmed reads.
+- Uncalled4 keeps `BC`, `RG`, `MM`, `ML` and `MN`.
+
 ---
 
 # Inputs
@@ -187,9 +243,10 @@ See the [Dependencies](#dependencies) section for full installation details, inc
 ### Description
 Oxford Nanopore sequencing reads for treatment and control samples. Treatment samples are typically treated with a chemical probe (e.g., permanganate) while control samples are untreated.
 
-The pipeline auto-detects the input format at runtime — no CONFIG flag required:
-- **FASTQ/BAM mode**: standard basecalled reads; produces the standard per-base error track only
-- **Pod5 mode**: raw signal files; triggers Phase 0 (Dorado basecalling + Uncalled4 signal alignment) and adds a parallel per-base signal deviation track alongside the standard error track
+How an input enters the workflow is decided by its CONFIG prefix, and within `^r` the format is auto-detected at runtime:
+- **FASTQ/BAM mode** (`^r`): standard basecalled reads; produces the standard per-base error track only
+- **Pod5 mode** (`^r`): raw signal files; triggers Phase 0 (Dorado basecalling + Uncalled4 signal alignment) and adds a parallel per-base signal deviation track alongside the standard error track
+- **Uncalled4 mode** (`^u`): a BAM that has already been through `uncalled4 align`; phases 0 and 1 do not run, and both tracks are produced from the DTW tags the BAM already carries
 
 ### Format
 Standard FASTQ (gzipped), unaligned BAM, or raw Oxford Nanopore pod5 files.
@@ -212,6 +269,9 @@ Supported input formats and how to specify them:
 | Unaligned BAM | `/path/to/{sample}.bam` | Standard error track |
 | Pod5 directory | `/path/to/pod5/run/` (searched recursively) | Pod5 mode — adds signal track |
 | Single pod5 file | `/path/to/{sample}.pod5` | Pod5 mode — adds signal track |
+| Uncalled4 BAM (on a `^u` line) | `/path/to/{sample}.bam` (`.bai` alongside) | Uncalled4 mode — signal track, phases 0–1 skipped |
+
+An Uncalled4 BAM must go on a `^u` line. On an `^r` line it is treated as ordinary aligned reads and re-mapped through `samtools fastq | minimap2`, which drops the DTW tags.
 
 The raw_sample name used throughout the pipeline is derived from the path basename minus extension (e.g., `/runs/Sample01.bam` → `Sample01`). If two paths from different `^r` lines would produce the same name, CONFIG.sh exits with an error listing the conflicting paths.
 
@@ -826,6 +886,7 @@ The wildcard variables are assigned designated as:
 ^w The window files you want in the windows bed files
 ^s The significance threshold for identifying reactive nucleotides (0 = all data, no threshold; 1–4 = p-value cutoffs; multiple lines allowed; level 0 does not produce density files)
 ^r The relationship between sequencing reads. Treatment and control fields are absolute (or relative) paths to the input file or directory. The raw_sample name is derived from the path basename minus extension.
+^u The same three fields as ^r, for inputs that are **already Uncalled4-aligned** (`nanoprint preprocess` output, or `uncalled4 align` run by hand). The DAG starts after signal alignment: no basecalling, mapping, filtering or `uncalled4 align`. See "Continuing the pipeline on ROAR".
 ^t Directories containing temporary files (auto-deleted after use)
 ^igv-bam Generate strand-split BAMs and indices for IGV visualization (flag, no value)
 ^igv-bigwig Generate coverage bigWig files for each strand-split BAM (flag, no value)
@@ -1010,6 +1071,34 @@ Example:
 ## 0c. uncalled4_convert_tsv (pod5 mode)
 
 **Description:** Convert an Uncalled4 BAM to a strand-specific DTW TSV without re-running signal alignment. Pre-filters to one strand via `samtools view`, then calls `uncalled4 convert`. Run once per strand (for and rev) after `uncalled4_align`.
+
+> **This rule is kept for small datasets, and nothing in the workflow depends on it.**
+> `perbase_signal_deviation` reads the Uncalled4 BAM directly, so the DTW TSV is no
+> longer an intermediate on the way to the signal tracks: it is an optional,
+> user-requested output for inspecting per-read DTW values, feeding an external tool,
+> debugging a locus, or producing a test oracle for the BAM-reading path.
+>
+> Because nothing consumes it, `^t data/uncalled4_tsv` no longer causes auto-deletion —
+> a temp output is removed once its consumers finish, and here there are none. A TSV you
+> ask for is a TSV you keep.
+>
+> The rule is still a normal part of the DAG, so ask Snakemake for the files by name:
+>
+> ```bash
+> # one sample, one strand
+> snakemake --cores 4 data/uncalled4_tsv/{genome}/{sample}_for.tsv
+>
+> # a whole sample, both strands
+> snakemake --cores 8 data/uncalled4_tsv/{genome}/{sample}_{for,rev}.tsv
+> ```
+>
+> **Check the size before you ask for it.** The TSV holds one row per aligned base per read,
+> so it scales with depth x genome, not with genome: roughly `aligned_bases x 60 bytes`.
+> A few hundred megabases of alignment is fine; a WGS sample at 1000x is hundreds of GB
+> (js4022 measured 308 GB for a single sample strand). For a locus, pass a region to
+> `uncalled4 convert` with `-R` rather than converting the whole BAM. If you do request
+> these files on a large dataset, add `^t data/uncalled4_tsv` to CONFIG so each one is
+> deleted as soon as it has been consumed.
 
 **Script:** `workflow/scripts/Uncalled4_convert_tsv.sh`
 
@@ -1433,45 +1522,50 @@ Example:
 
 ## 2b. perbase_signal_deviation (pod5 mode)
 
-**Description:** Compute per-base pore model signal deviation from an Uncalled4 DTW TSV. Groups per-read DTW measurements by reference position and computes multiple statistics from `dtw.model_diff` (observed − model current, normalized units). The 10-column output includes mean deviation, quantiles, and mean squared deviation (normalized²). The mean squared deviation (column 10) is used as the signal metric for Phase 3b reactivity calculation.
+**Description:** Compute per-base pore model signal deviation **directly from the Uncalled4 BAM**. Groups per-read DTW measurements by reference position and computes multiple statistics from `dtw.model_diff` (observed − model current, normalized units). The 10-column output includes mean deviation, quantiles, and mean squared deviation (normalized²). The mean squared deviation (column 10) is used as the signal metric for Phase 3b reactivity calculation.
 
 **Script:** `workflow/scripts/perbase_signal_deviation.py`
 
 **Inputs:**
-- `data/uncalled4_tsv/{genome}/{sample}_{strand}.tsv` (strand-specific TSV from `uncalled4_convert_tsv`)
-- `resources/genomes/{genome}.fa` (fallback for nucleotide lookup if dtw.base absent)
+- The Uncalled4 BAM + `.bai` — built by `uncalled4_align`, or supplied verbatim by a `^u` CONFIG line
+- `resources/genomes/{genome}.fa` (passed to uncalled4 as `--ref`, and used for nucleotide identity)
 
 **Outputs:**
 - `data/perbase_signal/{genome}/{sample}_{strand}.txt.gz`
 
 **Dependencies:**
-- python3, pandas, pysam (fallback only)
+- python3, numpy, pysam, **uncalled4**
+
+**Why uncalled4 and not our own tag parsing:** the DTW tags are easy to read, but turning them into genome coordinates is not. `Sequence()` shifts the `ur` bounds by `model.PRMS.shift` at the start and `k-shift-1` at the end, **swaps those two for a reverse-strand read**, and places reverse-strand coordinates in negative `mpos` space where `pos = -mpos-1` (`src/cpp/seq.hpp:270-306`, `src/uncalled4/pore_model.py:519-527`). Getting it wrong shifts every reactivity value by a few bases while the track still looks entirely plausible. The script calls `Tracks` / `sam_to_aln()` and skips only uncalled4's pandas/TSV layer, so the coordinate maths stays uncalled4's.
+
+**Memory and disk:** one streaming pass over the coordinate-sorted BAM. Each read's observations are binned into fixed-width genome windows (`-w`, default 10 kb), and a window is finalised as soon as no later read can reach it — reads arrive sorted by start, so window *w* is done once a read starts at or past its end. **Nothing is written to disk.** Peak memory is the windows currently open: window size x per-strand coverage x 12 bytes, ~120 MB at 10 kb and 1000x. Lower `-w` for deeper data; windows are cut on genome coordinates, so every observation at a position stays in one window and the result cannot change. Arriving below the watermark (an unsorted BAM) is a hard error, not a warning — a track quietly missing a slice of its data looks normal downstream.
+
+For comparison, the path this replaced wrote a ~570 GB TSV per sample strand, a strand-filtered copy of the BAM, and its own binary window files.
 
 **Documentation:**
 
 ```
-Usage: perbase_signal_deviation.py -i <dtw.tsv> -g <genome.fa> -o <output.txt.gz>
+Usage: perbase_signal_deviation.py -i <uncalled4.bam> -g <genome.fa> -s <for|rev> \
+           -o <output.txt.gz> [--window 10000] [-c MIN_COV]
 
-Compute per-base pore model signal deviation from an Uncalled4 DTW TSV.
+Compute per-base pore model signal deviation from an Uncalled4 BAM.
 
 Required arguments:
-    -i    Input Uncalled4 DTW TSV (strand-filtered; produced by uncalled4_convert_tsv)
-    -g    Reference genome FASTA (fallback for nucleotide lookup if dtw.base absent)
+    -i    Input Uncalled4 BAM (coordinate-sorted and indexed)
+    -g    Reference genome FASTA. Passed to uncalled4 as --ref (needed for the pore
+          model k-mer behind dtw.model_diff) and used for nucleotide identity.
+    -s    Strand: for or rev. Replaces the samtools pre-filter the convert-based
+          rule needed — reads are filtered in memory.
     -o    Output file (.txt.gz)
 
 Optional arguments:
     -c    Minimum coverage to emit a position (default: 1)
-
-Input TSV columns (subset used):
-    dtw.model_diff    Model current - observed current (pA); the signal deviation metric
-    dtw.base          Reference base (letter or integer; handled automatically)
-    ref / seq_name    Chromosome name (column name varies by uncalled4 version)
-    pos / seq_pos     0-based reference position (converted to 1-based in output)
+    -w    Genome window size in nt (default: 10000). Sets peak memory.
 
 Output format (tab-delimited, gzipped):
     Column 1:  Chromosome name
     Column 2:  Position (1-based)
-    Column 3:  Nucleotide (from dtw.base; pysam FASTA as fallback)
+    Column 3:  Nucleotide (pysam FASTA lookup)
     Column 4:  Coverage (reads at this position)
     Column 5:  Mean signal deviation (mean dtw.model_diff, normalized units)
     Column 6:  Q25  — 0.25 quantile of dtw.model_diff (lower 50% CI bound, normalized)
@@ -1482,12 +1576,17 @@ Output format (tab-delimited, gzipped):
 
 Notes:
     - dtw.model_diff = observed - model (positive = observed current higher than expected)
-    - Positions where DTW failed (marked '*' in TSV) are excluded (read as NaN)
-    - Handles uncalled4 version differences in column naming automatically
+    - Positions where DTW failed are excluded (uncalled4 reports them as NaN)
+    - Coordinates and model_diff come from uncalled4's decoder, never from our own
+      reading of the ur/ul/uc tags
+    - A BAM that is not coordinate-sorted is refused, not silently mis-binned
+    - Quantiles use linear interpolation between order statistics, matching
+      numpy.percentile and pandas.Series.quantile defaults
 
 Example:
-    perbase_signal_deviation.py -i data/uncalled4_tsv/genome/Sample01_for.tsv \
-        -g resources/genomes/genome.fa -o data/perbase_signal/genome/Sample01_for.txt.gz
+    perbase_signal_deviation.py -i data/uncalled4/genome/Sample01.bam \
+        -g resources/genomes/genome.fa -s for \
+        -o data/perbase_signal/genome/Sample01_for.txt.gz
 ```
 
 ---
@@ -1512,7 +1611,7 @@ Example:
 **Documentation:**
 
 ```
-Usage: Calculate_reactivity.sh -p <MnO4.txt.gz> -m <CTRL.txt.gz> -o <output.txt.gz> [-c threshold] [-T tmpdir]
+Usage: Calculate_reactivity.sh -p <MnO4.txt.gz> -m <CTRL.txt.gz> -o <output.txt.gz> [-c threshold] [-f field] [-T tmpdir]
 
 Calculate reactivity from perbase error (treatment minus control).
 
@@ -1523,15 +1622,19 @@ Required arguments:
 
 Optional arguments:
     -c    Minimum coverage threshold (default: 10)
+    -f    Column number to use as the value metric (default: 5)
+          Use 5 for mean per-base error or mean signal deviation.
+          Use 10 for mean squared signal deviation (normalized^2, not pA^2 —
+          dtw.model_diff is in normalized units).
     -T    Temporary directory (default: same directory as output)
     -h    Show this help message
 
-Input format (5 columns, tab-separated):
+Input format (tab-separated; only columns 1-4 and -f are used):
     1. Chromosome name
     2. Position (1-based)
     3. Nucleotide identity
     4. Coverage
-    5. Perbase error
+    5. Value metric (or whichever column is specified with -f)
 
 Output format (4 columns, tab-separated):
     1. Chromosome name
@@ -2513,6 +2616,17 @@ The pipeline detects pod5 input automatically at Snakemake run time via the `has
 3. Otherwise → standard FASTQ/BAM mode
 
 No CONFIG flag is needed. The `find_raw_reads()` function in phase 1 returns `data/basecalled/{sample}.bam` when pod5 is detected, causing Snakemake to add `dorado_basecall` as an upstream dependency automatically.
+
+A `^u` sample is not detected but declared: CONFIG.sh writes it into the `UNCALLED4_PATHS` dict, and `has_uncalled4()` reads that. The helpers in the same file follow from it:
+
+| Helper | Meaning |
+|---|---|
+| `has_pod5(s)` | raw signal is available to basecall and align |
+| `has_uncalled4(s)` | an Uncalled4 BAM was supplied via `^u` |
+| `has_signal(s)` | either of the above — the test phases 2b/3b/4b need |
+| `uncalled4_bam(wc)` | the supplied path for a `^u` sample, otherwise `data/uncalled4/{genome}/{raw_sample}.bam` |
+
+Returning the supplied path verbatim is what makes the DAG start after signal alignment: `data/uncalled4/...` is never requested for that sample, so Snakemake never instantiates `uncalled4_align`, and nothing upstream of it either.
 
 ### Signal Analysis Data Flow
 

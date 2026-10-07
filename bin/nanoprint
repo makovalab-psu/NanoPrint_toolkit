@@ -59,6 +59,8 @@ Subcommands:
                   Uncalled4 pore-model signal alignment. Produces a BAM ready
                   to transfer to a CPU-only cluster (e.g. ROAR) for the
                   remaining NanoPrint pipeline steps.
+    demux         Split a barcoded BAM (from preprocess -k <kit>) into per-sample
+                  BAMs using a barcode -> sample sheet.
 
 Run '$(basename "$0") <subcommand> -h' for subcommand-specific help.
 
@@ -70,7 +72,7 @@ EOF
 
 usage_preprocess() {
     cat << EOF
-Usage: $(basename "$0") preprocess -i <pod5_path> -g <genome.fa> -o <output.bam> -p <threads> [-m <model>] [-T <tmp_dir>] [--keep-basecalled] [--keep-aligned] [--keep-filtered]
+Usage: $(basename "$0") preprocess -i <pod5_path> -g <genome.fa> -o <output.bam> -p <threads> [-m <model>] [-k <kit>] [-T <tmp_dir>] [--keep-basecalled] [--keep-aligned] [--keep-filtered]
 
 Run all GPU-intensive preprocessing steps to produce an Uncalled4 BAM:
 
@@ -108,6 +110,13 @@ Optional arguments:
           rejected with "is not a recognised model name" (dorado 1.3.3).
           Valid full names are what 'dorado download --list' prints.
           If the default is ever rejected, use -m sup,5mCG_5hmCG.
+          Bacteria (js4022): -m 'sup@v5.2.0,4mC_5mC,6mA' (all-context 4mC/5mC + 6mA;
+          tested on dorado 1.3.2).
+    -k    Barcoding kit, e.g. SQK-RBK114-24. Dorado classifies barcodes during
+          basecalling (--kit-name <kit> --no-trim): all barcodes stay in the one
+          output BAM, each read tagged BC:Z:<kit>_barcodeNN (unclassified reads have
+          no BC tag), and reads are NOT trimmed so sequence, move table and signal
+          stay consistent for Uncalled4. Split afterwards with 'nanoprint demux'.
     -T    Directory for intermediate files (default: <output_dir>/tmp_nanoprint_<PID>)
           Deleted on exit regardless of success or failure. Intermediates NOT
           persisted via --keep-* live here and are lost if a later step fails.
@@ -121,6 +130,11 @@ Persisted files are written as:
     <output_dir>/<output_stem>_basecalled.bam
     <output_dir>/<output_stem>_aligned.bam
     <output_dir>/<output_stem>_filtered.bam (+ .bai)
+
+Step 4 always writes its per-pod5 Uncalled4 BAMs to <output_dir>/<output_stem>_uc4_parts/,
+whatever --keep-* flags are given. If a run fails after or during step 4, rerun with
+the same -o and only the pod5 files not yet done are aligned again. The folder is
+removed once the final BAM is indexed.
 
 Auto-resume: if one of these files already exists when preprocess starts, that
 step AND every step before it are skipped, and the existing file is reused —
@@ -180,8 +194,47 @@ has_mod_tags() {
     [[ "${n:-0}" -gt 0 ]]
 }
 
+# ---------------------------------------------------------------------------
+# has_barcode_tags <bam> — true if the BAM carries dorado barcode classifications
+# (BC:Z:, written by dorado basecaller --kit-name). Same sampling as has_mod_tags.
+#
+# nanoprint demux splits on BC, and BC goes through the same `samtools fastq -T`
+# allowlist in Map_reads.sh that has silently dropped fn and MM/ML before.
+# ---------------------------------------------------------------------------
+has_barcode_tags() {
+    local bam="$1" n
+    [[ -f "$bam" ]] || return 1
+    set +o pipefail
+    n=$(samtools view "$bam" 2>/dev/null \
+        | head -n "$MOD_TAG_SCAN_READS" \
+        | grep -c "$(printf '\t')BC:Z:" || true)
+    set -o pipefail
+    [[ "${n:-0}" -gt 0 ]]
+}
+
+# ---------------------------------------------------------------------------
+# restore_rg_header <src_bam> <dst_bam> <tmp_dir>
+#
+# Map_reads.sh carries dorado's @RG header lines into the aligned BAM, so each per-read
+# RG tag resolves to its run, flowcell and models. Whether uncalled4 keeps input header
+# lines is untested (js4022 probe input had none). If <src_bam> has @RG lines and
+# <dst_bam> has none, append them to <dst_bam>'s header with samtools reheader. Must run
+# before <dst_bam> is indexed.
+# ---------------------------------------------------------------------------
+restore_rg_header() {
+    local src="$1" dst="$2" tmp="$3" n_src n_dst
+    n_src=$(samtools view -H "$src" | grep -c '^@RG' || true)
+    n_dst=$(samtools view -H "$dst" | grep -c '^@RG' || true)
+    if [[ "${n_src:-0}" -gt 0 && "${n_dst:-0}" -eq 0 ]]; then
+        echo "  Restoring ${n_src} @RG header line(s) not carried through uncalled4..."
+        { samtools view -H "$dst"; samtools view -H "$src" | grep '^@RG'; } > "${tmp}/rg_header.sam"
+        samtools reheader "${tmp}/rg_header.sam" "$dst" > "${tmp}/reheadered.bam"
+        mv "${tmp}/reheadered.bam" "$dst"
+    fi
+}
+
 cmd_preprocess() {
-    local INPUT="" GENOME="" OUTPUT="" THREADS="" MODEL="$DEFAULT_DORADO_MODEL" TMP_DIR=""
+    local INPUT="" GENOME="" OUTPUT="" THREADS="" MODEL="$DEFAULT_DORADO_MODEL" TMP_DIR="" KIT=""
     local KEEP_BASECALLED=false KEEP_ALIGNED=false KEEP_FILTERED=false
 
     # Manual loop (not getopts) — needed for --keep-* long options.
@@ -192,6 +245,7 @@ cmd_preprocess() {
             -o) OUTPUT="$2"; shift 2 ;;
             -p) THREADS="$2"; shift 2 ;;
             -m) MODEL="$2"; shift 2 ;;
+            -k) KIT="$2"; shift 2 ;;
             -T) TMP_DIR="$2"; shift 2 ;;
             --keep-basecalled) KEEP_BASECALLED=true; shift ;;
             --keep-aligned)    KEEP_ALIGNED=true; shift ;;
@@ -260,6 +314,7 @@ cmd_preprocess() {
     printf "%-10s %s\n" "Output:"  "$OUTPUT"
     printf "%-10s %s\n" "Threads:" "$THREADS"
     printf "%-10s %s\n" "Model:"   "$MODEL"
+    printf "%-10s %s\n" "Kit:"     "${KIT:-none (no barcode classification)}"
     printf "%-10s %s\n" "Tmp dir:" "$TMP_DIR"
     echo "========================================"
     echo ""
@@ -293,21 +348,33 @@ cmd_preprocess() {
         else
             BASECALLED="${TMP_DIR}/basecalled.bam"
         fi
+        local KIT_ARGS=()
+        [[ -n "$KIT" ]] && KIT_ARGS=(-k "$KIT")
         "$SCRIPTS/Dorado_basecall.sh" \
             -i "$INPUT" \
             -o "$BASECALLED" \
             -m "$MODEL" \
-            -t "$THREADS"
+            -t "$THREADS" \
+            ${KIT_ARGS[@]+"${KIT_ARGS[@]}"}
+
+        # A warning, not an error: aborting here would delete an ephemeral basecalled
+        # BAM that may represent days of GPU time, and a sample of reads that happens
+        # to be unclassified is possible. nanoprint demux reports the real numbers.
+        if [[ -n "$KIT" ]] && ! has_barcode_tags "$BASECALLED"; then
+            echo "Warning: -k $KIT was given, but none of the first $MOD_TAG_SCAN_READS basecalled" >&2
+            echo "         reads carry a BC:Z: barcode tag. Check the kit name before demux." >&2
+        fi
     fi
     echo ""
 
     # -----------------------------------------------------------------------
     # Step 2: Align to genome (preserving dorado tags)
-    # samtools fastq -T "MM,ML,mv,ts,pi,sp,ns,fn" | minimap2 -y keeps the tags
-    # uncalled4 needs for DTW signal alignment, the fn tag (source pod5 basename)
-    # that step 4 needs to split reads by pod5, and the MM/ML base modification
-    # calls. That -T list is an allowlist — see Map_reads.sh before adding a
-    # consumer that depends on any other dorado tag.
+    # samtools fastq -T "MM,ML,MN,mv,ts,pi,sp,ns,fn,BC,RG,qs" | minimap2 -y keeps
+    # the tags uncalled4 needs for DTW signal alignment, the fn tag (source pod5
+    # basename) that step 4 needs to split reads by pod5, the MM/ML/MN base
+    # modification calls, and the BC/RG barcode and read-group tags that
+    # nanoprint demux needs. That -T list is an allowlist — see Map_reads.sh
+    # before adding a consumer that depends on any other dorado tag.
     # -----------------------------------------------------------------------
     if [[ -n "$ALIGNED" || -n "$FILTERED" ]]; then
         echo "[2/4] Aligning to genome — skipped (reusing existing output)"
@@ -339,6 +406,23 @@ cmd_preprocess() {
             echo "         aligned:    $ALIGNED" >&2
             echo "" >&2
             echo "       Fix: add MM,ML to the tag allowlist in" >&2
+            echo "       workflow/scripts/Map_reads.sh (samtools fastq -T \"...\")." >&2
+            echo "" >&2
+            echo "       Then delete ${PERSIST_ALIGNED} if it exists and re-run with the" >&2
+            echo "       same -o. With --keep-basecalled the basecalling step is reused," >&2
+            echo "       so this costs no GPU time." >&2
+            exit 1
+        fi
+
+        # Same guard for the barcode classification nanoprint demux splits on.
+        if has_barcode_tags "$BASECALLED" && ! has_barcode_tags "$ALIGNED"; then
+            echo "" >&2
+            echo "Error: barcode tags (BC:Z:) are present in the basecalled BAM" >&2
+            echo "       but absent from the aligned BAM — alignment dropped them." >&2
+            echo "         basecalled: $BASECALLED" >&2
+            echo "         aligned:    $ALIGNED" >&2
+            echo "" >&2
+            echo "       Fix: add BC,RG to the tag allowlist in" >&2
             echo "       workflow/scripts/Map_reads.sh (samtools fastq -T \"...\")." >&2
             echo "" >&2
             echo "       Then delete ${PERSIST_ALIGNED} if it exists and re-run with the" >&2
@@ -395,7 +479,7 @@ cmd_preprocess() {
         find "$INPUT" -name "*.pod5" -type f | sort > "$POD5_LIST"
     fi
     local N_POD5
-    N_POD5=$(wc -l < "$POD5_LIST")
+    N_POD5=$(wc -l < "$POD5_LIST" | tr -d ' ')
     [[ "$N_POD5" -eq 0 ]] && { echo "Error: No .pod5 files found under $INPUT" >&2; exit 1; }
     echo "  Found $N_POD5 pod5 file(s)"
 
@@ -411,11 +495,41 @@ cmd_preprocess() {
         exit 1
     fi
 
+    # Per-pod5 Uncalled4 BAMs are written next to -o, not into TMP_DIR. In js4022 the
+    # merge below failed after ~1.5 days of Uncalled4 over 1690 pod5s, and the EXIT
+    # trap deleted every per-pod5 BAM with TMP_DIR. Kept here, a rerun with the same
+    # -o skips each pod5 already done. A pod5 is done if its <stem>_uc4.bam exists
+    # (uncalled4 writes into partial/ and the file is mv'd in only when finished) or
+    # it is listed in no_reads.txt. The directory is removed once the final BAM is
+    # indexed.
+    local UC4_DIR="${OUT_DIR}/${STEM}_uc4_parts"
+    local UC4_NO_READS="${UC4_DIR}/no_reads.txt"
+    local UC4_SORTED="${UC4_DIR}/sorted.txt"
+    mkdir -p "${UC4_DIR}/partial"
+    touch "$UC4_NO_READS" "$UC4_SORTED"
+
+    local DONE_LIST="${TMP_DIR}/uc4_done.txt"
+    local TODO_LIST="${TMP_DIR}/uc4_todo.txt"
+    {
+        find "$UC4_DIR" -maxdepth 1 -name '*_uc4.bam' | sed 's#.*/##; s/_uc4\.bam$/.pod5/'
+        cat "$UC4_NO_READS"
+    } > "$DONE_LIST"
+    awk -F/ -v done="$DONE_LIST" '
+        BEGIN { while ((getline l < done) > 0) d[l] = 1 }
+        !($NF in d)' "$POD5_LIST" > "$TODO_LIST"
+    local N_TODO
+    N_TODO=$(wc -l < "$TODO_LIST" | tr -d ' ')
+    if [[ "$N_TODO" -lt "$N_POD5" ]]; then
+        echo "  Resuming: $((N_POD5 - N_TODO)) of $N_POD5 pod5 file(s) already done in $UC4_DIR"
+    fi
+
+    if [[ "$N_TODO" -gt 0 ]]; then
     # Split filtered BAM into per-pod5 BAMs.
     # Strategy: sort by fn:Z: tag so all reads from the same pod5 are adjacent,
     # then stream through awk keeping only ONE samtools pipe open at a time.
     # (The naive approach of opening one pipe per pod5 simultaneously fails with
     # EMFILE once the pod5 count exceeds ~ulimit -n / 2, typically ~500.)
+    # Reads from pod5s that are already done are dropped here.
     local SPLIT_DIR="${TMP_DIR}/split"
     mkdir -p "$SPLIT_DIR"
     local HEADER_SAM="${SPLIT_DIR}/_header.sam"
@@ -429,9 +543,10 @@ cmd_preprocess() {
 
     echo "  Splitting by pod5 source (single pass, BAM output)..."
     samtools view -@ "$THREADS" "$FN_SORTED" \
-      | awk -v dir="$SPLIT_DIR" -v hdr="$HEADER_SAM" '
+      | awk -v dir="$SPLIT_DIR" -v hdr="$HEADER_SAM" -v done="$DONE_LIST" '
     BEGIN {
         while ((getline line < hdr) > 0) header = header line "\n"
+        while ((getline line < done) > 0) d[line] = 1
         cur_stem = ""; cur_cmd = ""
     }
     {
@@ -439,6 +554,7 @@ cmd_preprocess() {
         for (i = 12; i <= NF; i++) {
             if (substr($i, 1, 5) == "fn:Z:") { fn = substr($i, 6); break }
         }
+        if (fn in d) next
         if (fn == "") fn = "_no_fn"
         stem = fn; sub(/\.pod5$/, "", stem)
         if (stem != cur_stem) {
@@ -458,11 +574,6 @@ cmd_preprocess() {
     echo "  Split complete."
 
     # Process each pod5 in turn — sequential I/O, no random cross-file seeking
-    local UC4_DIR="${TMP_DIR}/uc4"
-    mkdir -p "$UC4_DIR"
-    local UC4_BAM_LIST="${TMP_DIR}/uc4_bams.txt"
-    > "$UC4_BAM_LIST"
-
     local pod5_num=0
     while IFS= read -r pod5_file; do
         pod5_num=$((pod5_num + 1))
@@ -470,73 +581,191 @@ cmd_preprocess() {
         fn_name="$(basename "$pod5_file")"
         local pod5_stem="${fn_name%.pod5}"
         local split_bam="${SPLIT_DIR}/${pod5_stem}.bam"
+        local uc4_partial="${UC4_DIR}/partial/${pod5_stem}_uc4.bam"
         local uc4_bam="${UC4_DIR}/${pod5_stem}_uc4.bam"
 
         if [[ ! -f "$split_bam" ]]; then
-            echo "  [$pod5_num/$N_POD5] $fn_name — no reads after filtering, skipped"
+            echo "  [$pod5_num/$N_TODO] $fn_name — no reads after filtering, skipped"
+            echo "$fn_name" >> "$UC4_NO_READS"
             continue
         fi
 
-        echo "  [$pod5_num/$N_POD5] $fn_name"
+        echo "  [$pod5_num/$N_TODO] $fn_name"
 
         samtools index "$split_bam"
 
         # uncalled4 returns non-zero when any reads fail DTW; use || true and
         # check for output rather than relying on exit code.
+        rm -f "$uc4_partial"
         uncalled4 align \
             --bam-in "$split_bam" \
             --ref    "$GENOME" \
             --reads  "$pod5_file" \
             -p       "$THREADS" \
             --min-aln-length 50 \
-            -o       "$uc4_bam" || true
+            -o       "$uc4_partial" || true
 
         rm -f "$split_bam" "${split_bam}.bai"
 
-        if [[ -f "$uc4_bam" ]]; then
-            echo "$uc4_bam" >> "$UC4_BAM_LIST"
+        if [[ -f "$uc4_partial" ]]; then
+            # uncalled4 writes records in signal-processing order while inheriting
+            # the input's SO:coordinate header — a header that lies. The final merge
+            # streams the parts in coordinate order and trusts it, so sort here, per
+            # pod5 (~100 MB), rather than re-sorting the whole ~260 GB concatenation
+            # at the end. Sorting into partial/ and moving up keeps the invariant
+            # that <stem>_uc4.bam exists only when that pod5 is completely done.
+            samtools sort -@ "$THREADS" -T "${UC4_DIR}/partial/sort_tmp" \
+                -o "${uc4_partial}.sorted" "$uc4_partial"
+            rm -f "$uc4_partial"
+            mv "${uc4_partial}.sorted" "$uc4_bam"
+            basename "$uc4_bam" >> "$UC4_SORTED"
         else
             echo "    Warning: uncalled4 produced no output for $fn_name" >&2
         fi
-    done < "$POD5_LIST"
+    done < "$TODO_LIST"
+    fi
 
+    local UC4_BAM_LIST="${TMP_DIR}/uc4_bams.txt"
+    find "$UC4_DIR" -maxdepth 1 -name '*_uc4.bam' | sort > "$UC4_BAM_LIST"
     local N_UC4
-    N_UC4=$(wc -l < "$UC4_BAM_LIST")
+    N_UC4=$(wc -l < "$UC4_BAM_LIST" | tr -d ' ')
     if [[ "$N_UC4" -eq 0 ]]; then
         echo "Error: Uncalled4 produced no output BAMs" >&2
         exit 1
     fi
 
-    # Concatenate all per-pod5 uncalled4 BAMs (unsorted), sort once, and index
+    # Parts written before per-pod5 sorting existed are still in uncalled4's
+    # processing order. Sort them once, one at a time (~1 part of extra disk), and
+    # record them, so a rerun does not sort them again.
+    local UNSORTED_LIST="${TMP_DIR}/uc4_unsorted.txt"
+    awk -F/ -v sorted="$UC4_SORTED" '
+        BEGIN { while ((getline l < sorted) > 0) s[l] = 1 }
+        !($NF in s)' "$UC4_BAM_LIST" > "$UNSORTED_LIST"
+    local N_UNSORTED
+    N_UNSORTED=$(wc -l < "$UNSORTED_LIST" | tr -d ' ')
+    if [[ "$N_UNSORTED" -gt 0 ]]; then
+        echo ""
+        echo "  Coordinate-sorting $N_UNSORTED per-pod5 BAM(s) from an earlier run..."
+        local part n_sorted=0
+        while IFS= read -r part; do
+            n_sorted=$((n_sorted + 1))
+            [[ $((n_sorted % 100)) -eq 0 ]] && echo "    [$n_sorted/$N_UNSORTED]"
+            samtools sort -@ "$THREADS" -T "${UC4_DIR}/partial/sort_tmp" \
+                -o "${part}.sorted" "$part"
+            mv "${part}.sorted" "$part"
+            basename "$part" >> "$UC4_SORTED"
+        done < "$UNSORTED_LIST"
+        echo "    [$N_UNSORTED/$N_UNSORTED] done."
+    fi
+
+    # Merge the coordinate-sorted per-pod5 BAMs, then index.
+    #
+    # samtools merge streams sorted inputs straight into a sorted output with no
+    # temporary spill. The earlier `samtools cat | samtools sort` instead wrote
+    # ~250 GB of sort temp files while the 263 GB of parts were still on disk, and
+    # filled /storage 90 GB into an expected ~263 GB output. samtools reported that
+    # as "Illegal seek" — a stale errno from the failed write, not a seek problem.
+    #
+    # -c/-p combine the identical @RG/@PG headers that every part carries; without
+    # them samtools amends the colliding IDs and the output gets one @RG per part
+    # (1608 x 25 here), which breaks the run_id parsing in nanoprint demux.
+    #
+    # merge still opens every input at once, so the open-file limit is raised first
+    # (1608 inputs vs hermes' soft limit of 1024), with a batched fallback.
     echo ""
-    echo "  Merging $N_UC4 per-pod5 BAMs, sorting, and indexing..."
-    samtools cat -b "$UC4_BAM_LIST" \
-        | samtools sort -@ "$THREADS" -T "${TMP_DIR}/sort_tmp" -o "$OUTPUT"
+    echo "  Merging $N_UC4 per-pod5 BAMs and indexing..."
+    ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
+    local MAX_OPEN
+    MAX_OPEN=$(ulimit -n)
+    [[ "$MAX_OPEN" == unlimited ]] && MAX_OPEN=1048576
+    MAX_OPEN=$((MAX_OPEN - 64))          # headroom for samtools' own files
+    [[ "$MAX_OPEN" -lt 100 ]] && MAX_OPEN=100
+
+    # The merged BAM is about the size of the parts, and a batched merge needs room
+    # for one extra full copy. Checked here rather than discovered two thirds of the
+    # way through writing it.
+    local PARTS_KB AVAIL_KB NEED_KB
+    PARTS_KB=$(du -sk "$UC4_DIR" | cut -f1)
+    AVAIL_KB=$(df -Pk "$OUT_DIR" | awk 'NR==2 {print $4}')
+    NEED_KB="$PARTS_KB"
+    [[ "$N_UC4" -gt "$MAX_OPEN" ]] && NEED_KB=$((PARTS_KB * 2))
+    if [[ "${AVAIL_KB:-0}" -lt "$NEED_KB" ]]; then
+        echo "Error: not enough free disk to merge the per-pod5 Uncalled4 BAMs." >&2
+        printf "       parts:  %s GiB in %s\n" "$((PARTS_KB / 1048576))" "$UC4_DIR" >&2
+        printf "       needed: %s GiB\n" "$((NEED_KB / 1048576))" >&2
+        printf "       free:   %s GiB on the filesystem holding %s\n" \
+            "$((AVAIL_KB / 1048576))" "$OUT_DIR" >&2
+        echo "       Free space and rerun with the same -o: the finished per-pod5 BAMs" >&2
+        echo "       are kept, so the rerun resumes here at the merge." >&2
+        exit 1
+    fi
+
+    # Merge into a temp name and rename only once quickcheck passes, so a failure
+    # never leaves a truncated BAM sitting at the output path looking finished.
+    local MERGE_TMP="${OUTPUT%.bam}.merge_tmp.bam"
+    rm -f "$MERGE_TMP"
+    local MERGE_LIST="$UC4_BAM_LIST"
+    if [[ "$N_UC4" -gt "$MAX_OPEN" ]]; then
+        echo "  Open-file limit is $(ulimit -n); merging in batches of $MAX_OPEN first..."
+        local MERGE_DIR="${TMP_DIR}/merge_batches"
+        mkdir -p "$MERGE_DIR"
+        split -l "$MAX_OPEN" -d -a 4 "$UC4_BAM_LIST" "${MERGE_DIR}/list_"
+        local lst
+        for lst in "${MERGE_DIR}"/list_*; do
+            samtools merge -@ "$THREADS" -c -p \
+                -b "$lst" -o "${MERGE_DIR}/batch_${lst##*list_}.bam"
+        done
+        find "$MERGE_DIR" -name 'batch_*.bam' | sort > "${MERGE_DIR}/batches.txt"
+        MERGE_LIST="${MERGE_DIR}/batches.txt"
+    fi
+    samtools merge -@ "$THREADS" -c -p -b "$MERGE_LIST" -o "$MERGE_TMP"
+    rm -rf "${TMP_DIR}/merge_batches"
+    if ! samtools quickcheck -v "$MERGE_TMP"; then
+        echo "Error: the merged Uncalled4 BAM is truncated or malformed: $MERGE_TMP" >&2
+        echo "       The per-pod5 BAMs in $UC4_DIR are untouched; fix the cause and" >&2
+        echo "       rerun with the same -o to resume at the merge." >&2
+        exit 1
+    fi
+    mv "$MERGE_TMP" "$OUTPUT"
+    restore_rg_header "$FILTERED" "$OUTPUT" "$TMP_DIR"
     samtools index "$OUTPUT"
     echo ""
 
     # uncalled4 rewrites every record, and whether it propagates tags it does not
-    # itself use is outside our control. If the modification calls did not survive
-    # it, the filtered BAM is the last copy that has them — and unless
+    # itself use is outside our control. If the modification calls or barcode tags did
+    # not survive it, the filtered BAM is the last copy that has them — and unless
     # --keep-filtered was passed it lives in TMP_DIR, seconds away from the EXIT
-    # trap. Rescue it rather than silently destroying the only modBAM, which is
+    # trap. Rescue it rather than silently destroying the only copy, which is
     # what "retain the modification data" has to mean when the last tool in the
-    # chain is a third-party one.
-    if has_mod_tags "$FILTERED" && ! has_mod_tags "$OUTPUT"; then
-        echo "Warning: base modification tags (MM/ML) did not survive uncalled4 align." >&2
-        echo "         The Uncalled4 BAM has the DTW signal data but no methylation calls." >&2
+    # chain is a third-party one. (The js4022 probe, uncalled4 4.1.0, kept all
+    # of MM/ML/MN/BC/RG — this is a guard, not an expected path.)
+    local LOST_MOD=false LOST_BC=false
+    has_mod_tags "$FILTERED" && ! has_mod_tags "$OUTPUT" && LOST_MOD=true
+    has_barcode_tags "$FILTERED" && ! has_barcode_tags "$OUTPUT" && LOST_BC=true
+    if [[ "$LOST_MOD" == true || "$LOST_BC" == true ]]; then
+        [[ "$LOST_MOD" == true ]] && {
+            echo "Warning: base modification tags (MM/ML) did not survive uncalled4 align." >&2
+            echo "         The Uncalled4 BAM has the DTW signal data but no methylation calls." >&2
+        }
+        [[ "$LOST_BC" == true ]] && {
+            echo "Warning: barcode tags (BC:Z:) did not survive uncalled4 align." >&2
+            echo "         nanoprint demux cannot split the Uncalled4 BAM by barcode." >&2
+        }
         if [[ "$FILTERED" == "$PERSIST_FILTERED" ]]; then
-            echo "         The modification calls are preserved in: $PERSIST_FILTERED" >&2
+            echo "         The lost tags are preserved in: $PERSIST_FILTERED" >&2
         else
             echo "         Preserving the pre-uncalled4 BAM, which still has them:" >&2
             cp "$FILTERED" "$PERSIST_FILTERED"
             samtools index "$PERSIST_FILTERED"
             echo "           $PERSIST_FILTERED" >&2
         fi
-        echo "         Use that BAM for methylation analysis (modkit etc.), and the" >&2
-        echo "         Uncalled4 BAM for signal analysis." >&2
+        echo "         Use that BAM for methylation analysis (modkit etc.) and to recover" >&2
+        echo "         barcodes by read name, and the Uncalled4 BAM for signal analysis." >&2
         echo "" >&2
     fi
+
+    # The final BAM is indexed, so the per-pod5 parts are no longer needed.
+    rm -rf "$UC4_DIR"
 
     echo "========================================"
     echo " Done."
@@ -550,6 +779,65 @@ cmd_preprocess() {
 }
 
 # ---------------------------------------------------------------------------
+# demux subcommand — thin wrapper around workflow/scripts/Demux_bam.sh
+# ---------------------------------------------------------------------------
+
+usage_demux() {
+    cat << EOF
+Usage: $(basename "$0") demux -i <input.bam> -s <samplesheet.tsv> -o <out_dir> [-p <threads>]
+
+Split a barcoded BAM into per-sample BAMs by the dorado BC:Z: tag. Intended for the
+output of 'nanoprint preprocess -k <kit>'. One streaming pass; every tag (Uncalled4
+DTW, MM/ML, BC, RG) is kept.
+
+Required arguments:
+    -i    Input BAM (coordinate-sorted)
+    -s    Sample sheet, tab-separated: barcode<TAB>sample
+            barcode  barcodeNN or <kit>_barcodeNN
+            sample   letters, digits, '.', '_', '-'
+          Barcodes sharing a sample name are pooled into one BAM. Lines starting
+          with '#' are ignored. Reads with no BC tag, or a barcode not listed,
+          go to unclassified.bam.
+    -o    Output directory (must not already contain .bam files)
+
+Optional arguments:
+    -p    Threads for BAM decoding (default: 4)
+    -h    Show this help
+
+Outputs (in <out_dir>):
+    <sample>.bam(.bai)          one per sample name
+    unclassified.bam(.bai)
+    demux_counts.tsv            sample, barcode, run_id, reads, bases
+    samplesheet.normalized.tsv  the sheet as applied
+
+The run exits with an error if the output records do not add up to the input.
+
+Example (js4022: two barcodes per condition, pooled):
+    printf 'barcode01\\tBsub_PLBS338_0mMCTRL_js4022\\nbarcode07\\tBsub_PLBS338_0mMCTRL_js4022\\n' > samplesheet.tsv
+    $(basename "$0") demux -i results/js4022_all_uncalled4.bam -s samplesheet.tsv -o results/demux -p 8
+EOF
+    exit 1
+}
+
+cmd_demux() {
+    local INPUT="" SHEET="" OUT_DIR="" THREADS=4
+    [[ $# -eq 0 ]] && usage_demux
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -i) INPUT="$2"; shift 2 ;;
+            -s) SHEET="$2"; shift 2 ;;
+            -o) OUT_DIR="$2"; shift 2 ;;
+            -p) THREADS="$2"; shift 2 ;;
+            -h|--help) usage_demux ;;
+            *)
+                echo "Error: Unknown option: $1" >&2
+                usage_demux ;;
+        esac
+    done
+    "$SCRIPTS/Demux_bam.sh" -i "$INPUT" -s "$SHEET" -o "$OUT_DIR" -t "$THREADS"
+}
+
+# ---------------------------------------------------------------------------
 # main dispatch
 # ---------------------------------------------------------------------------
 
@@ -560,6 +848,7 @@ shift
 
 case "$SUBCOMMAND" in
     preprocess)  cmd_preprocess "$@" ;;
+    demux)       cmd_demux "$@" ;;
     -h|--help)   usage_main ;;
     *)
         echo "Error: Unknown subcommand '$SUBCOMMAND'" >&2

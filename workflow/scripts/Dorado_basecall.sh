@@ -10,13 +10,19 @@
 # DORADO_MODEL in CONFIG.sh. A model with no modification suffix produces a BAM
 # with no MM/ML tags, which cannot be recovered without basecalling again.
 #
-# Usage: Dorado_basecall.sh -i <pod5_dir_or_file> -o <output.bam> -m <model> [-t <threads>]
+# -k <kit> classifies barcodes during basecalling (dorado --kit-name) and adds --no-trim.
+# Trimming is off so the read sequence stays consistent with the move table and raw signal
+# that Uncalled4 aligns; minimap2 soft-clips the barcode and adapter instead. All barcodes
+# go into the one output BAM, each read tagged BC:Z:<kit>_barcodeNN (unclassified reads
+# carry no BC tag). Tested with SQK-RBK114-24 on dorado 1.3.2 (js4022): mv/ts survive.
+#
+# Usage: Dorado_basecall.sh -i <pod5_dir_or_file> -o <output.bam> -m <model> [-t <threads>] [-k <kit>]
 
 set -euo pipefail
 
 usage() {
     cat << EOF
-Usage: $(basename "$0") -i <pod5_dir_or_file> -o <output.bam> -m <model> [-t <threads>]
+Usage: $(basename "$0") -i <pod5_dir_or_file> -o <output.bam> -m <model> [-t <threads>] [-k <kit>]
 
 Basecall Oxford Nanopore pod5 files using Dorado.
 Emits move tables (--emit-moves) required by Uncalled4 signal alignment.
@@ -31,6 +37,8 @@ Required arguments:
 
 Optional arguments:
     -t    Number of threads (default: 1; GPU usage controlled by dorado itself)
+    -k    Barcoding kit (e.g. SQK-RBK114-24). Adds --kit-name <kit> --no-trim, so reads
+          are classified into BC:Z: tags in the single output BAM, untrimmed.
     -h    Show this help message
 
 Notes:
@@ -49,13 +57,15 @@ INPUT=""
 OUTPUT=""
 MODEL=""
 THREADS=1
+KIT=""
 
-while getopts "i:o:m:t:h" opt; do
+while getopts "i:o:m:t:k:h" opt; do
     case $opt in
         i) INPUT="$OPTARG" ;;
         o) OUTPUT="$OPTARG" ;;
         m) MODEL="$OPTARG" ;;
         t) THREADS="$OPTARG" ;;
+        k) KIT="$OPTARG" ;;
         h) usage ;;
         *) usage ;;
     esac
@@ -84,10 +94,12 @@ echo "Input:   $INPUT"
 echo "Model:   $MODEL"
 echo "Output:  $OUTPUT"
 echo "Threads: $THREADS"
+echo "Kit:     ${KIT:-none (no barcode classification)}"
 echo ""
 
 DORADO_FLAGS=(--emit-moves)
 [[ -d "$INPUT" ]] && DORADO_FLAGS+=(--recursive)
+[[ -n "$KIT" ]] && DORADO_FLAGS+=(--kit-name "$KIT" --no-trim)
 
 dorado basecaller \
     "$MODEL" \
