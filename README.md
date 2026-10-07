@@ -8,6 +8,12 @@ When raw pod5 files are provided as input, the pipeline additionally runs Dorado
 
 The toolkit is composed of a series of scripts found in workflow/scripts. A user can use the pipeline as intended with Snakemake, or use individual scripts as documented below.
 
+Regression tests for the DTW signal branch live in `workflow/tests/` — see
+`workflow/tests/README.md`. They check `perbase_signal_deviation` against the
+`uncalled4 convert` path it replaced, which is one reason the `uncalled4_convert_tsv`
+rule is kept even though nothing in the workflow consumes it. The test data is ~104 MB
+and is not in this repository; the tests README records where it lives.
+
 ---
 
 # Quick Start: GPU Preprocessing (`nanoprint preprocess`)

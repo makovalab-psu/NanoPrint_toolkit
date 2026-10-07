@@ -94,6 +94,37 @@ if [[ -z "$CONDA_ENV" ]]; then
     exit 1
 fi
 
+# Resolve the conda environment to an absolute prefix.
+#
+# The generated script puts <prefix>/bin on PATH rather than calling
+# `conda activate`, which is a shell function that does not exist in a
+# non-interactive batch shell (see claude.md, "conda activate in a batch job").
+# That needs a path, not a name, so resolve it here -- where conda is on hand and
+# a mistake is visible immediately instead of after a queue wait.
+if [[ "$CONDA_ENV" == /* || "$CONDA_ENV" == ./* || "$CONDA_ENV" == ../* ]]; then
+    CONDA_PREFIX_RESOLVED="$CONDA_ENV"
+elif command -v conda > /dev/null 2>&1; then
+    # `conda env list` prints "name [*] /abs/prefix"; take the last absolute field.
+    CONDA_PREFIX_RESOLVED=$(conda env list | awk -v n="$CONDA_ENV" '
+        $1 == n { for (i = NF; i >= 1; i--) if ($i ~ /^\//) { print $i; exit } }')
+else
+    CONDA_PREFIX_RESOLVED=""
+fi
+
+if [[ -z "$CONDA_PREFIX_RESOLVED" ]]; then
+    echo "Error: could not resolve conda env '$CONDA_ENV' to a filesystem path." >&2
+    echo "       Pass an absolute prefix instead, e.g." >&2
+    echo "         --env \$(conda info --base)/envs/$CONDA_ENV" >&2
+    echo "       or, for an env outside the base install:" >&2
+    echo "         --env \$HOME/.conda/envs/$CONDA_ENV" >&2
+    exit 1
+fi
+
+if [[ ! -x "${CONDA_PREFIX_RESOLVED}/bin/python3" ]]; then
+    echo "Warning: ${CONDA_PREFIX_RESOLVED}/bin/python3 not found or not executable." >&2
+    echo "         The generated script's preflight will refuse to start snakemake." >&2
+fi
+
 if [[ ! -f "$SNAKEFILE" ]]; then
     echo "Error: Snakefile not found: $SNAKEFILE" >&2
     exit 1
@@ -385,7 +416,7 @@ echo "Job ID:       \$SLURM_JOB_ID"
 echo "Job Name:     \$SLURM_JOB_NAME"
 echo "Nodes:        \$SLURM_NODELIST"
 echo "Cores:        \$SLURM_NTASKS"
-echo "Partition:    \$SLURM_QUEUE"
+echo "Partition:    \$SLURM_JOB_PARTITION"
 echo "Submit Dir:   \$SLURM_SUBMIT_DIR"
 echo "Start Time:   \$(date)"
 echo "============================================"
@@ -393,9 +424,90 @@ echo ""
 
 # ============================================================================
 # Load software
+#
+# NOT `conda activate`. That is a shell FUNCTION, undefined in a non-interactive
+# batch shell, so the call fails and -- with no `set -e` -- the job carries on
+# using whatever python the anaconda module provides. That python typically has
+# numpy and snakemake but NOT pysam or uncalled4, so every rule up to phase 2b
+# succeeds and only the signal rules notice. Three js4022 jobs (55925757,
+# 55927396, 56009102) were lost to this; the bare env name, an absolute env path
+# and `source conda.sh` all failed to fix it. Putting <prefix>/bin on PATH cannot
+# fail quietly, and the preflight below proves it took effect.
 # ============================================================================
+CONDA_PREFIX_WANTED="${CONDA_PREFIX_RESOLVED}"
+
 module load anaconda
-conda activate ${CONDA_ENV}
+export PATH="\${CONDA_PREFIX_WANTED}/bin:\${PATH}"
+
+# Activate as well, for packages that rely on their activation scripts. Both
+# lines are non-fatal: PATH above has already done the part that matters.
+if CONDA_BASE="\$(conda info --base 2>/dev/null)"; then
+    source "\${CONDA_BASE}/etc/profile.d/conda.sh" 2>/dev/null || true
+    conda activate "\${CONDA_PREFIX_WANTED}" 2>/dev/null || true
+fi
+
+# ============================================================================
+# Preflight
+#
+# Fail here, in seconds, rather than from inside a snakemake rule hours in.
+# Written to stderr: stdout on /storage can lag far enough behind that a .out
+# file looks empty while the job has already finished.
+# ============================================================================
+{
+    echo "--- preflight ---"
+    echo "PATH head:    \${PATH%%:*}"
+    echo "CONDA_PREFIX: \${CONDA_PREFIX:-<unset>}"
+    for tool in python3 snakemake samtools bedtools bedGraphToBigWig uncalled4; do
+        printf '%-18s %s\n' "\$tool" "\$(command -v "\$tool" || echo '<NOT FOUND>')"
+    done
+} >&2
+
+PREFLIGHT_OK=1
+
+# The check that matters most: is python3 actually the env's? The js4022 failures
+# were not missing packages but the wrong interpreter -- base anaconda's, which
+# happens to carry numpy and snakemake. An import test alone would have passed
+# on a base install that also had pysam, and the run would have been silently
+# wrong about everything else.
+PY_PATH="\$(command -v python3 || true)"
+if [[ "\$PY_PATH" != "\${CONDA_PREFIX_WANTED}/bin/python3" ]]; then
+    echo "Error: python3 resolves to '\${PY_PATH:-<not found>}'," >&2
+    echo "       not '\${CONDA_PREFIX_WANTED}/bin/python3'." >&2
+    echo "       The environment did not take effect." >&2
+    PREFLIGHT_OK=0
+fi
+
+# Required for every run. Keep the traceback: "No module named" and a failed
+# shared-library load are different problems with different fixes.
+if ! IMPORT_ERR=\$(python3 -c "import numpy, pysam" 2>&1); then
+    echo "Error: python3 at \$(command -v python3) cannot import numpy/pysam." >&2
+    echo "       Expected the interpreter under \${CONDA_PREFIX_WANTED}." >&2
+    printf '%s\n' "\$IMPORT_ERR" | sed 's/^/       /' >&2
+    PREFLIGHT_OK=0
+fi
+
+for tool in snakemake samtools; do
+    if ! command -v "\$tool" > /dev/null; then
+        echo "Error: \$tool not on PATH" >&2
+        PREFLIGHT_OK=0
+    fi
+done
+
+# Only needed by some phases, so warn rather than fail: bedtools and the UCSC
+# tools for phases 4/6, uncalled4 for the pod5 and ^u signal rules.
+for tool in bedtools bedGraphToBigWig; do
+    command -v "\$tool" > /dev/null || \
+        echo "Warning: \$tool not on PATH -- phase 4 and 6 rules will fail." >&2
+done
+python3 -c "import uncalled4" 2>/dev/null || \
+    echo "Warning: uncalled4 not importable -- phase 0/2b signal rules will fail." >&2
+
+if [[ "\$PREFLIGHT_OK" -ne 1 ]]; then
+    echo "Preflight FAILED -- not starting snakemake. Check --env." >&2
+    exit 1
+fi
+echo "Preflight OK" >&2
+echo "" >&2
 
 # ============================================================================
 # Run pipeline
@@ -431,6 +543,7 @@ echo "  SLURM Configuration Summary"
 echo "============================================"
 echo "  Snakefile:    $SNAKEFILE"
 echo "  Conda env:    $CONDA_ENV"
+echo "  Env prefix:   $CONDA_PREFIX_RESOLVED"
 echo "  Allocation:   $ALLOC"
 if [[ "$ALLOC" == "open" ]]; then
     echo "  Partition:    open"

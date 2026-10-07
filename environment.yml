@@ -42,9 +42,14 @@ dependencies:
   # The old remedy pinned pod5==0.3.10 + pyarrow<15. That no longer installs: lib-pod5
   # 0.3.10 is not on PyPI, and current pod5 requires pyarrow >=20, so the pin is not
   # satisfiable (js4026, 2026-08-24 — nanoprint2 resolves to pyarrow 22).
-  # Whether the deadlock still reproduces on current versions is UNTESTED. On the first
-  # pod5 run in a fresh env, watch for uncalled4 sitting near 0% CPU producing no output;
-  # if it hangs that way, this is the cause. If it runs clean, delete this note.
+  # It did NOT reproduce in js4022 (Sep 2026): `nanoprint preprocess` on hermes ran
+  # `uncalled4 align` over 1690 pod5 files / 27.7 M reads to completion, reading POD5
+  # signal throughout. That is strong evidence the deadlock is gone -- but the pyarrow
+  # version in that hermes env was never recorded, so it is not proof for a fresh env.
+  # On the first pod5 run in a new env, watch for uncalled4 sitting near 0% CPU
+  # producing no output; if it hangs that way, this is the cause. Note that near-zero
+  # CPU on the MAIN uncalled4 process is normal (workers do the DTW) -- check the child
+  # processes and whether the output BAM is still growing before concluding it hung.
   # Only POD5 reading is affected — `uncalled4 convert` on an existing Uncalled4 BAM
   # reads DTW tags and never opens a pod5.
 

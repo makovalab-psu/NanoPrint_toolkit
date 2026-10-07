@@ -742,7 +742,10 @@ sbatch 20260217_submit_nanoprint.sh
 3. For each rule, takes the **max** of bench03 (human HG002) and bench04 (chicken.v23) averages as a conservative estimate; also tracks peak RSS per rule
 4. Computes: `(total_serial_time / cores) * 1.2` safety margin, rounded up to next hour, capped at 14 days
 5. Prints a **memory summary**: rule with peak RSS, minimum cores needed at 8 GB/core, and a WARNING if `--cores` is insufficient
-6. Generates sbatch script with `module load anaconda`, `conda activate`, and `snakemake --cores $SLURM_NTASKS`
+6. Resolves `--env` to an absolute conda prefix (accepts a name or a path) and fails here if it cannot
+7. Generates sbatch script with `module load anaconda`, `export PATH=<prefix>/bin:$PATH`, a preflight that
+   asserts the interpreter and imports, and `snakemake --cores $SLURM_NTASKS`.
+   **Not `conda activate`** — see the dev note at the end of this file for why it cannot work in a batch job
 
 **Partition auto-selection:**
 - `--alloc open` → `#SBATCH --partition=open` (free queue, no `--account`)
@@ -751,7 +754,9 @@ sbatch 20260217_submit_nanoprint.sh
 **Roar cluster details (from ROAR_pdfs/):**
 - Partitions: `open` (free), `basic` (4 GB/core), `standard` (8 GB/core), `himem` (20 GB/core), `sla-prio` (paid allocations)
 - Max wall time: 14 days (normal QOS)
-- Conda: `module load anaconda` then `conda activate <env>`
+- Conda: `module load anaconda` works interactively, but **`conda activate` does NOT work in a
+  batch script** — it is a shell function that is undefined there and fails silently. Use
+  `export PATH="<env_prefix>/bin:$PATH"`; see the dev note at the end of this file
 - Single-node jobs: `--nodes=1 --ntasks=<cores>` (Snakemake is shared-memory parallel)
 
 **Benchmark data:**
@@ -954,9 +959,15 @@ data/filtered_alignments/{genome}/{sample}.bam
     └─→ uncalled4_align (phase 0)          ← needs aligned BAM with mv tags intact
 data/uncalled4/{genome}/{sample}.bam       ← compact BAM with all DTW tags
     ├─→ perbase_error (phase 2)            ← replaces filtered BAM as input when pod5 present
-    └─→ uncalled4_convert_tsv (phase 0)    ← fast format conversion, no re-alignment
-data/uncalled4_tsv/{genome}/{sample}_{strand}.tsv
-    └─→ perbase_signal_deviation (phase 2b) ← mean dtw.model_diff per position
+    ├─→ perbase_signal_deviation (phase 2b) ← reads the DTW tags DIRECTLY (see the
+    │                                         dev note at the end of this file); one
+    │                                         strand per call via -s
+    └─→ uncalled4_convert_tsv (phase 0)    ← OPTIONAL SIDE BRANCH, nothing consumes it.
+         ↓                                   Kept for small datasets, locus inspection
+data/uncalled4_tsv/{genome}/{sample}_{strand}.tsv   (-R) and generating test oracles.
+                                             Request it by name; it is not built otherwise.
+
+data/perbase_signal/{genome}/{sample}_{strand}.txt.gz
          ↓ split_signal_by_chr (genome_specific_rules.smk)
 data/perbase_signal_by_chr/{genome}/{sample}_{strand}/{chr}.txt.gz
     ↓ calculate_signal_reactivity (phase 3b)
@@ -1580,15 +1591,20 @@ Two details worth keeping:
   The new pass 1 compares the field count against the header and skips, counting the
   skips. Those malformed rows are a known uncalled4 quirk (js4007), so this was a real bug.
 
-**`data/uncalled4_tsv` is now a temp-able output.** `TEMP_OUTPUTS` gained an
-`uncalled4_tsv` key and `uncalled4_convert_tsv` wraps its output in `wrap_output()`, so
-`^t data/uncalled4_tsv` in CONFIG makes Snakemake delete each TSV as soon as
-`perbase_signal_deviation` has consumed it. Without that line the TSVs are kept, which is
-what you want only if you plan to run `uncalled4 convert` output through something else.
+**`data/uncalled4_tsv` became a temp-able output.** `TEMP_OUTPUTS` gained an
+`uncalled4_tsv` key and `uncalled4_convert_tsv` wraps its output in `wrap_output()`.
 
-**Still unresolved: `uncalled4 convert` itself.** On a 50 kb slice of a js4022 sample it
-was OOM-killed on a Roar Collab submit node. Nothing here changes convert's own memory
-use; that needs measuring inside a job with a known `--mem`, not on a login node.
+> **Superseded, Sep 2026.** `perbase_signal_deviation` now reads the Uncalled4 BAM
+> directly, so nothing in the workflow consumes the TSV and `^t data/uncalled4_tsv` no
+> longer deletes anything — a temp output is removed once its consumers finish, and
+> there are none. A TSV you request by name is a TSV you keep. See the dev note at the
+> end of this file.
+
+**`uncalled4 convert`'s own memory use was never solved** — on a 50 kb slice of a js4022
+sample it was OOM-killed on a Roar Collab submit node, and inside a job it wrote 349 GB
+of TSV before being killed again. It is no longer on the critical path, so this stopped
+being a blocker rather than getting fixed. It still applies if you request a TSV by name
+on a deep dataset: use `-R` to limit convert to a region.
 
 ### `rule all` reached signal reactivity only through the bigWigs (js4022, Sep 2026)
 
@@ -1640,10 +1656,37 @@ the forward strand and 5 on the reverse.
 
 **Streaming, one pass, no disk.** The BAM is coordinate-sorted, so observations arrive in
 genome order. Each read's `(pos, deviation)` pairs are binned into `-w` windows, and a
-window is finalised once a read starts at or past its end. Peak memory is the open windows
-— window x per-strand coverage x 12 bytes, ~120 MB at 10 kb and 1000x. An observation
-arriving below the watermark raises rather than being dropped: a track quietly missing a
-slice of its data looks entirely normal downstream.
+window is finalised once a read starts at or past its end. An observation arriving below
+the watermark raises rather than being dropped: a track quietly missing a slice of its
+data looks entirely normal downstream.
+
+**Measured cost at scale (js4022, 4,215,606 bp, ~1150-2250x total, `-w 10000`):**
+
+| | per sample strand |
+|---|---|
+| Wall time | 23-44 min (mean 36) |
+| Peak RSS | **3.86-4.22 GB** (mean 4.05) |
+| io_in | 26-45 GB (the sample BAM) |
+| cpu/wall | 0.97 — CPU-bound, single-threaded |
+
+All 12 strand-jobs are ~7.2 CPU-hours, about 0.9 h wall at `--cores 8`. For comparison,
+the `uncalled4 convert` path it replaced wrote 349 GB of TSV, was OOM-killed, and never
+finished a single sample.
+
+**Peak RSS is ~35x higher than the `window x coverage x 12 bytes` rule of thumb** (which
+predicted ~120 MB). The rule undercounts three things:
+- The in-memory arrays are int64 position + float64 value = **16 bytes**, not the 12 the
+  old implementation's binary temp files used.
+- `format_window` allocates ~4 transient full-size arrays per window — the `lexsort`
+  index, sorted copies of `pos` and `val`, and `val * val` — roughly tripling a window's
+  footprint while it is being reduced.
+- More windows stay open than on a short contig. The mtDNA test reported 2 on a 16 kb
+  contig; on 4.2 Mb with long reads it is several, and buffers scale with that count.
+
+So budget **~4-5 GB per concurrent job**, not megabytes. At `--cores 8` that is ~34 GB
+against a 64 GB allocation — comfortable, but raising `--cores` without raising
+`--mem-per-cpu`, or running deeper data, would OOM. `-w` is the dial: it scales the
+window buffer and all the transients linearly, and cannot change the result.
 
 **The statistics block is unchanged** (lexsort, `add.reduceat`, `group_quantile` with
 numpy's `_lerp` switch at t>=0.5), so old and new outputs are directly diffable. Verified
@@ -1663,12 +1706,14 @@ edge-case BAMs from `make_dtw_test_cases.py`. Note that the js4028 BAMs under
 `data/uncalled4/` are **symlinks** into `data/mtDNA/` (the pre-`^u` staging workaround);
 copy from `data/mtDNA/` or use `rsync -L`.
 
-**Result against the mtDNA oracle (2026-09-29): PASSED, and the two do NOT match
-byte-for-byte — by design.** Forward strand: 1,528 reads decoded, 264 positions skipped
-as NaN, 16,560 rows written, peak 2 windows open. Chromosome, position, nucleotide and
-**coverage are identical on every row**, so the decode, the strand filter, the
-coordinate mapping and the NaN handling all agree exactly. The mean and the four
-quantiles differ in the last printed digit on a minority of rows, up to ~2e-6.
+**Result against the mtDNA oracle (2026-09-30): PASSED on BOTH strands, and the two do
+NOT match byte-for-byte — by design.** Forward: 1,528 reads, 264 NaN positions skipped,
+16,560 rows. Reverse: 1,643 reads, 334 skipped, 16,560 rows. Peak 2 windows open in
+both. Read counts match the BAM and row counts match the oracle exactly. Chromosome,
+position, nucleotide and **coverage are identical on every row of both strands**, so the
+decode, the strand filter, the coordinate mapping (including the reverse-strand `mpos`
+flip) and the NaN handling all agree. The mean and the four quantiles differ in the last
+printed digit on a minority of rows, worst case 5e-6.
 
 **The cause is in `uncalled4 convert`, not in either implementation.**
 `io/tsv.py:67` writes the TSV with `float_format="%.6g"`, so the oracle's statistics
@@ -1677,14 +1722,135 @@ The BAM-direct path never serialises, so it keeps the full float64. Six signific
 digits costs up to 5e-6 absolute near 1.2 and 5e-8 near 0.04, which is why the largest
 gap in the mtDNA comparison is at a position whose deviation is -1.2233.
 
-Quantiles drift most because each is an interpolation between two individual
-observations and inherits one value's rounding. The mean averages hundreds of values so
-the errors mostly cancel, and **column 10, the mean squared deviation that phase 3b
-actually consumes, was identical on every row inspected.**
+The per-column profile is the signature of `%.6g` and of nothing else. Differing rows
+out of 16,560 (forward / reverse), worst absolute difference:
+
+| mean | q25 | q75 | q025 | q975 | mean_sq |
+|---|---|---|---|---|---|
+| 140 / 131 | 1022 / 1208 | 1191 / 1327 | 3080 / 3092 | 2897 / 3013 | 182 / 260 |
+| 1e-6 | 4e-6 | 3e-6 | 5e-6 | 5e-6 | 1e-6 |
+
+**The 5e-6 worst case is the theoretical ceiling, hit but never crossed**: six
+significant digits on a value in [1,10) leaves five decimals, and the model's
+`norm_max` is 5.0 so deviations live in that decade. The outer quantiles drift most
+(~19% of rows) because they sample the tails where the values are largest and `%.6g`'s
+relative rounding costs the most absolute error; the inner quantiles less (~7%); and
+mean and mean squared least (~1%), averaging hundreds of values so errors cancel.
+Column 10 is the one phase 3b consumes via `-f 10`.
 
 Where they differ, the BAM path is the correct one. Do not "fix" this toward the
 oracle. `compare_to_oracle.py` in the test data directory reports per-column agreement,
 fails loudly on any chr/pos/nt/coverage mismatch (a real decode bug), and with
 `--prove-precision` re-runs the decode applying `%.6g` per observation and requires
 byte-identity with the oracle — turning the diagnosis into a proof rather than an
-argument.
+argument. `run_case_tests.sh` drives the whole nine-case set through convert + the
+pre-rewrite script + the comparison, and refuses to run if the git ref it recovers the
+oracle generator from already contains the rewrite.
+
+### `samtools view | head -1` is a silent lie under pipefail (js4022, Oct 2026)
+
+`igv_coverage_bigwig` tested for an empty BAM with:
+
+```bash
+if ! samtools view {input.bam} | head -1 | grep -q .; then
+    touch {output.bw}      # "No reads"
+```
+
+Snakemake wraps every shell block in `set -euo pipefail`. `head -1` exits after one
+line and closes the pipe, `samtools view` dies of **SIGPIPE (141)**, and `pipefail`
+promotes that to the pipeline's exit status — so `!` is true and the rule concludes the
+BAM is empty. `grep -q` succeeding is irrelevant.
+
+**It is size-dependent, which is why it survived so long.** On a small BAM samtools
+finishes writing before `head` exits, there is no SIGPIPE, and the test is correct.
+js4022's 14-26 GB strand-split BAMs failed every single time: all 12 bigWigs came out
+**0 bytes**, each with a matching log line reading `No reads in … — creating empty
+bigWig` next to a 24 GB BAM and a 3.5 MB index. Reproduced outside the pipeline with a
+2M-line file: `set -o pipefail; cat big | head -1 | grep -q .` exits **141**; without
+`pipefail`, 0.
+
+**Fix: count from the index.**
+
+```bash
+N_READS=$(samtools idxstats {input.bam} | awk '{n += $3 + $4} END {print n + 0}')
+if [[ "$N_READS" -eq 0 ]]; then
+```
+
+`samtools idxstats` reads only the `.bai` — already a declared input of the rule — so it
+is instant on a 24 GB BAM instead of streaming it, and `awk` drains its input so it
+cannot SIGPIPE. The non-empty branch now logs the read count, so "ran correctly" and
+"silently decided it was empty" are distinguishable in the log.
+
+**Rule of thumb: never put `head -N` downstream of a long-running producer in a
+pipeline whose exit status you test.** `head` closing the pipe is normal and expected;
+`pipefail` turns it into a failure. Either read from an index or a small file, or
+compute the thing and check the *result* was non-empty afterwards — which is what
+`20261002_coverage_bigwigs.sh` in the js4022 project directory does, and why it would
+have produced correct bigWigs here.
+
+Audited the rest of the toolkit for the same shape: `Alignment_stats.sh:253,257`,
+`bg_to_bw.sh:137`, `react_dens.sh:138` and `bin/nanoprint:493` all feed `head` from
+`grep`/`cut` over small files, where the producer finishes first, and all sit in command
+substitutions whose status is not tested. None need changing.
+
+### `conda activate` does not work in a batch job — SLURM_CONFIG.sh now avoids it (js4022, Oct 2026)
+
+`SLURM_CONFIG.sh` generated this into every script it emitted:
+
+```bash
+module load anaconda
+conda activate ${CONDA_ENV}
+```
+
+`conda activate` is a shell **function**. It does not exist in a non-interactive batch
+shell, and generated scripts carry no `set -e`, so the call fails and the job proceeds
+on whatever python the anaconda module provides. On Roar that python has numpy and
+snakemake but **not pysam or uncalled4** — so every rule through phase 2 succeeds and
+only the signal rules notice, which is the worst possible failure shape.
+
+**Three js4022 jobs were lost to it, and two plausible fixes did not work:**
+
+| Attempt | Job | Result |
+|---|---|---|
+| `conda activate <name>` | 55925757 | python3 = base anaconda |
+| `conda activate /abs/path/to/env` | 55927396 | python3 = base anaconda |
+| `source "$(conda info --base)/etc/profile.d/conda.sh"` then activate the abs path | 56009102 | python3 = base anaconda |
+
+No conda error appeared on stderr in any of them. Sourcing the hook — the textbook fix —
+did not help either, so the cause is not simply the missing function.
+
+**What works: put the env's `bin` on PATH.** Job 56120020, first clean run:
+
+```bash
+export PATH="${CONDA_PREFIX_WANTED}/bin:${PATH}"
+```
+
+Unlike `conda activate`, that cannot silently no-op. `conda activate` is still attempted
+afterwards, non-fatally, for packages that need their activation scripts — and with PATH
+set first it does then take (`CONDA_PREFIX` came out correct in 56120020), so ordering is
+what mattered.
+
+**The generator now also:**
+- Resolves `--env` to an absolute prefix **at generation time**, since PATH needs a path
+  and `--env` accepts a name. An unresolvable name fails immediately with the absolute
+  form to use, instead of after a queue wait.
+- Emits a preflight that **asserts `command -v python3` equals `<prefix>/bin/python3`**.
+  This is the check that matters: the failures were the wrong *interpreter*, not missing
+  packages, and an import test alone would pass on a base install that happened to carry
+  pysam while everything else was still wrong. Then it imports `numpy, pysam`, requires
+  snakemake and samtools, and warns (not fails) on bedtools/UCSC/uncalled4, which only
+  some phases need. Non-zero exit before snakemake starts.
+- Writes the preflight to **stderr**. Stdout on `/storage` lags far enough that a `.out`
+  file can look empty while the job has already finished — that cost an hour of
+  misdiagnosis on 56009102.
+- Fixes `$SLURM_QUEUE` → `$SLURM_JOB_PARTITION` in the banner, unset since the generator
+  was written, which is why every log to date printed a blank `Partition:` line.
+
+Verified by generating scripts against stub conda/snakemake and running them: a name
+resolves to a prefix; an unresolvable name fails at generation; and the generated
+preflight correctly rejects both a wrong interpreter and an env missing pysam, while
+passing a healthy one.
+
+`js4022_.../20261002_submit_nanoprint.sh` is the hand-written reference implementation
+this was derived from, and additionally carries a disk precheck for the phase 6 split
+BAMs.
