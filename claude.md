@@ -2186,8 +2186,11 @@ sweep/tables/{name}/positions.tsv.gz, summary.tsv, manifest.tsv   mod_sweep_tabl
 - A `^u` sample has no pre-filter reads and can only be in sets at that MAPQ; the sweep
   raises a named error otherwise.
 - `sweep_relationships=`, `sweep_genomes=`, `sweep_pools=true`, `sweep_name=` narrow or
-  extend it. The example table is 15 settings x 2 backends, one factor at a time around
-  the defaults, mostly at fpr 0.02 so sets are compared at equal background.
+  extend it. The example table is 24 mod-calling settings, each run identically at
+  three filters (MAPQ 20, 10, 0) and with both backends = 144 sets, named
+  `<backend>_q<mapq>_<setting>` so a setting lines up across filters. One factor at a
+  time around the defaults, mostly at fpr 0.02 so sets are compared at equal background.
+  On js4031 (15 samples, 3 references) that is roughly 18,000 jobs.
 - `summary.tsv` reports per set x relationship x contig: coverage, `background` (the
   control's realised modified fraction), mean and max reactivity, reactivity at T vs
   non-T, and `n_reactive`. It ranks nothing.
@@ -2213,10 +2216,16 @@ a per-k-mer or per-position cutoff in place of the global fpr cutoff; the half-A
 split fraction; using dwell (`dtw.length`) as a second signal; keeping supplementary
 alignments.
 
-**Caveat for unfiltered sets on js4031.** The three references are mapped separately and
-VEGF-WT and VEGF-NMR are near-identical, so much of what MAPQ 20 removes is reads that
-cannot be assigned between those two. At `mapq 0` they are kept and assigned arbitrarily:
-WT and NMR will be mixed. cMYC is not affected. Read the unfiltered results per contig.
+**Caveat for unfiltered sets on js4031 - corrected.** An earlier version of this note
+said VEGF-WT and VEGF-NMR are near-identical and would be mixed at `mapq 0`. That was
+asserted without looking at the sequences and is wrong: on `G4_strand` and
+`Reverse_complement` the three constructs share only the two constant spacers (longest
+common run 15-18 nt) and have different 20-nt flanks, as Jacob pointed out. What IS
+shared is on `PolyT_reverse_complement`: all three constructs have an identical 46-nt
+core (spacer - polyT - spacer), flanked by 20 unique bases on each side. A full-length
+PolyT read is assignable from its flanks; one with a truncated or badly called flank is
+not, and that is true of cMYC as well as the two VEGFs. So at `mapq 0` some PolyT reads
+may be assigned among the three constructs arbitrarily. How many has not been measured.
 
 **Tested / not tested.** Filter on a hand-made BAM: default identical to the old command;
 `-q 0` keeps MAPQ 0 primaries and still drops unmapped, secondary and supplementary.
@@ -2224,3 +2233,15 @@ WT and NMR will be mixed. cMYC is not affected. Read the unfiltered results per 
 dry-runs under snakemake 9.27 on a synthetic two-relationship workspace (362 jobs for
 the example table) with the right commands; `mod_sweep_table.py` was run on hand-made
 call files. **The sweep has not been executed on real data.**
+
+**Use `--rerun-triggers mtime` after the `filter_mapq` change (js4031, 2026-10-08).**
+Adding `params: mapq` and `-q {params.mapq}` to `filter_alignments` changed that rule's
+code and params, so Snakemake's provenance triggers want to rebuild every existing
+`data/filtered_alignments/` BAM and the `data/uncalled4/` BAMs behind them — the first
+sweep dry run on hermes scheduled 45 `filter_alignments` + 45 `uncalled4_align` jobs it
+had no reason to run. The rebuilt files would be identical (the default filter selects
+the same reads), but it costs 45 signal alignments and re-stamps the main outputs, which
+then makes everything downstream of them look stale. With `--rerun-triggers mtime` the
+same dry run schedules only `sweep_*` rules (17,786 jobs for the 144-set example table).
+Pass it to the sweep and to the next main-workflow run on any project whose filtered BAMs
+predate this change. Both `mod_sweep.smk` usage lines should be read as including it.

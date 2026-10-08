@@ -11,7 +11,13 @@
 #
 #   ./workflow/scripts/CONFIG.sh -i CONFIG -o Snakefile      # as usual
 #   snakemake -s workflow/sweeps/mod_sweep.smk --cores 30 --keep-going \
+#       --rerun-triggers mtime \
 #       --config sweep_table=workflow/sweeps/mod_sweep_example.tsv
+#
+# --rerun-triggers mtime: this file includes the main workflow, so without it a
+# main rule whose code or params changed since its outputs were built (as
+# filter_alignments did when filter_mapq was added) is rebuilt along with everything
+# downstream of it, although the sweep only wants to read those files.
 #
 # Sweep table: tab-separated, one parameter set per row, '#' lines ignored.
 #   set           name of the parameter set (unique; used in the output tables)
