@@ -78,8 +78,15 @@
 #   mod_fpr=0.02    the cutoff this fraction of the held-out control exceeds
 # Outputs are kept apart by threshold: data/mod_reactivity/<backend>/<genome>/p0.02/...
 # and .../fpr0.02/..., then matched/ or <pool name>/.
+# To compare many settings side by side (filter, model and test options), see
+# workflow/sweeps/mod_sweep.smk and its example table.
 # Other --config keys: mod_mad (15), mod_min_kmer_obs (30), mod_fisher_lag (0),
 # mod_max_obs_per_kmer (20000), mod_per_read (False).
+
+# Alignment filter: mapped primary alignments at or above a mapping quality
+# (unmapped, secondary and supplementary are always removed). Default 20; set with
+#   snakemake --config filter_mapq=0     # keep every mapped primary alignment
+# It applies to all samples and reruns everything downstream of the filter.
 
 # Pod5 / signal analysis settings
 # Uncomment and set when using pod5 raw data as input instead of FASTQ/BAM.

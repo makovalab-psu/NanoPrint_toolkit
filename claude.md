@@ -2142,3 +2142,85 @@ look before these numbers are used** (Jacob, 2026-10-08) - nothing has been deci
 `mod_pval`/`mod_fpr` and the global cutoff, `mod_min_kmer_obs` (30),
 `mod_max_obs_per_kmer` (20000), `mod_mad` (15), the +/-(k-1) clean flank, the Remora
 k-mer context (4,4) and trim, and Fisher smoothing (off).
+
+### Tunable alignment filter and the modification-calling parameter sweep (js4031, 2026-10-08)
+
+**Why.** On js4031 the MAPQ >= 20 filter removes most of what permanganate does to the
+PolyT strand: in treated G4 libraries only 10-14% of mapped PolyT reads pass it, against
+~60% in controls (rep 2: 12,319 mapped -> 1,734 passing). The reads it removes are the
+modified ones. Model oligos are also the only data small enough to tune the mod-calling
+defaults on; the genome datasets are far too large to sweep.
+
+**`filter_mapq` (main workflow).** `Filter_alignments.sh -q N`, set by
+`--config filter_mapq=N` (default 20, behaviour unchanged). The command is now
+`samtools view -q N -F 0x904`: unmapped, secondary and supplementary are always
+removed. Unmapped is excluded by flag because unmapped reads carry MAPQ 0, so `-q 0`
+alone would pass them to uncalled4. Supplementary stays out for the reasons in the
+concatemer note. Changing the key reruns everything from the filter down, in place.
+
+**The sweep (`workflow/sweeps/mod_sweep.smk`)** compares settings side by side without
+touching the main outputs. It `include`s the generated `Snakefile` (for the samples,
+relationships, pod5 paths, pools and the phase 0/2c helpers) and defines `sweep_all`
+before the include so that it, not `rule all`, is the default target.
+
+```bash
+snakemake -s workflow/sweeps/mod_sweep.smk --cores 30 --keep-going \
+    --config sweep_table=workflow/sweeps/mod_sweep_example.tsv
+```
+
+One row of the table = one parameter set: `set backend mapq mad max_obs flank scale
+min_kmer_obs fisher_lag threshold`. Everything goes under `sweep/`, keyed by parameters,
+so sets sharing a filter or a model share files:
+
+```
+sweep/filtered_alignments/mapq{q}/{genome}/{raw_sample}.bam       re-filtered data/aligned_reads
+sweep/uncalled4/mapq{q}/{genome}/{raw_sample}.bam                 signal re-aligned
+sweep/kmer_model/{backend}/mapq{q}/mad{m}_cap{c}_flank{f}/{genome}/{model}.tsv
+sweep/perbase_mod/{backend}/mapq{q}/{model tag}/{thr}_min{n}_fl{l}_{scale}/{genome}/…
+sweep/tables/{name}/positions.tsv.gz, summary.tsv, manifest.tsv   mod_sweep_table.py
+```
+
+- **A set at the main workflow's MAPQ reuses `data/uncalled4/`** instead of re-aligning,
+  which also makes it the exact baseline. Pass `filter_mapq=` to the sweep if the main
+  run did not use 20.
+- A `^u` sample has no pre-filter reads and can only be in sets at that MAPQ; the sweep
+  raises a named error otherwise.
+- `sweep_relationships=`, `sweep_genomes=`, `sweep_pools=true`, `sweep_name=` narrow or
+  extend it. The example table is 15 settings x 2 backends, one factor at a time around
+  the defaults, mostly at fpr 0.02 so sets are compared at equal background.
+- `summary.tsv` reports per set x relationship x contig: coverage, `background` (the
+  control's realised modified fraction), mean and max reactivity, reactivity at T vs
+  non-T, and `n_reactive`. It ranks nothing.
+
+**Options, and where each is set** (sweep column; main-workflow `--config` key):
+
+| What | Sweep | Main | Default | Script flag |
+|---|---|---|---|---|
+| Minimum MAPQ | `mapq` | `filter_mapq` | 20 | `Filter_alignments.sh -q` |
+| Signal backend | `backend` | `^mod-calls` | — | `--backend` |
+| Model outlier filter (x MAD) | `mad` | `mod_mad` | 15 | `--mad` |
+| Observations kept per k-mer | `max_obs` | `mod_max_obs_per_kmer` | 20000 | `--max-obs-per-kmer` |
+| Model error-mask flank | `flank` | — | k-1 | `--clean-flank` (new; -1 = off) |
+| Centre/spread of the test | `scale` | — | mean, SD | `--scale sd\|mad` (new) |
+| Minimum k-mer observations to score | `min_kmer_obs` | `mod_min_kmer_obs` | 30 | `--min-kmer-obs` |
+| Fisher window along the read | `fisher_lag` | `mod_fisher_lag` | 0 | `--fisher-lag` |
+| Threshold | `threshold` | `mod_pval` / `mod_fpr` | p 0.02 | `--pval` / `--fpr` |
+| Control model | `sweep_pools` | `^mod-pool` | matched | — |
+
+Not wired into the sweep, each needing a decision or new code first: the Remora k-mer
+context (`--kmer-context`, default 4,4) and its per-base trim and refinement iterations;
+a per-k-mer or per-position cutoff in place of the global fpr cutoff; the half-A/half-B
+split fraction; using dwell (`dtw.length`) as a second signal; keeping supplementary
+alignments.
+
+**Caveat for unfiltered sets on js4031.** The three references are mapped separately and
+VEGF-WT and VEGF-NMR are near-identical, so much of what MAPQ 20 removes is reads that
+cannot be assigned between those two. At `mapq 0` they are kept and assigned arbitrarily:
+WT and NMR will be mixed. cMYC is not affected. Read the unfiltered results per contig.
+
+**Tested / not tested.** Filter on a hand-made BAM: default identical to the old command;
+`-q 0` keeps MAPQ 0 primaries and still drops unmapped, secondary and supplementary.
+`--scale mad` and `--clean-flank` are covered in `test_mod_calling.py`. The sweep
+dry-runs under snakemake 9.27 on a synthetic two-relationship workspace (362 jobs for
+the example table) with the right commands; `mod_sweep_table.py` was run on hand-made
+call files. **The sweep has not been executed on real data.**

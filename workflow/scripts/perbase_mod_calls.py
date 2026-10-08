@@ -87,6 +87,10 @@ def parse_args():
                    help="Histograms from --hist-out on the held-out control (same "
                         "model, same --fisher-lag); all are pooled")
     p.add_argument("--hist-out", help="Write the calling statistic's histogram here")
+    p.add_argument("--scale", default="sd", choices=["sd", "mad"],
+                   help="What z is measured against: the k-mer mean and SD (default, "
+                        "as Rembo/Tombo), or its median and 1.4826 x MAD, which a "
+                        "heavy-tailed level distribution does not inflate")
     p.add_argument("--min-kmer-obs", type=int, default=30,
                    help="Do not score k-mers the model saw fewer times than this "
                         "(default: 30)")
@@ -117,7 +121,8 @@ def main():
     # The statistic a call is made on: |z|, or -log10 p once p-values have been
     # combined along the read. Both grow with evidence, so a call is stat > cutoff.
     statistic = "neglog10p" if args.fisher_lag else "absz"
-    hist_meta = {"statistic": statistic, "fisher_lag": args.fisher_lag,
+    hist_meta = {"statistic": statistic, "scale": args.scale,
+                 "fisher_lag": args.fisher_lag,
                  "model": args.model}
     if args.fpr is not None:
         cutoff, n_null = cutoff_from_hists(args.null_hist, args.fpr, hist_meta)
@@ -136,6 +141,7 @@ def main():
     print(f"Model:     {args.model}")
     print(f"Strand:    {args.strand}")
     print(f"Reads:     {args.half}")
+    print(f"Scale:     k-mer {'mean and SD' if args.scale == 'sd' else 'median and 1.4826 x MAD'}")
     print(f"Threshold: {how}  ->  {statistic} > {cutoff:.4f}"
           + (f", Fisher lag {args.fisher_lag}" if args.fisher_lag else ""))
     print(f"Output:    {args.output or '(histogram only)'}")
@@ -148,7 +154,7 @@ def main():
         if path:
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 
-    meta, m_kmer, m_n, m_mean, m_sd = load_model(args.model)
+    meta, m_kmer, m_n, m_mean, m_sd = load_model(args.model, scale=args.scale)
     source = open_source(args, strand=args.strand, need_clean=False)
 
     # Levels from the two backends differ in units and in which base of the k-mer

@@ -93,11 +93,20 @@ rule map_reads:
 
 
 rule filter_alignments:
-    """Filter alignments by mapping quality and remove secondary/supplementary."""
+    """Filter alignments by mapping quality and remove unmapped/secondary/supplementary.
+
+    --config filter_mapq=N sets the minimum MAPQ (default 20; 0 keeps every mapped
+    primary alignment). It applies to every sample and everything downstream is
+    built from the result, so changing it reruns the workflow from here. To compare
+    settings side by side without touching these outputs, use
+    workflow/sweeps/mod_sweep.smk, which builds its own copies under sweep/.
+    """
     input:
         bam="data/aligned_reads/{genome}/{raw_sample}.bam"
     output:
         bam="data/filtered_alignments/{genome}/{raw_sample}.bam"
+    params:
+        mapq=config.get("filter_mapq", 20)
     log:
         "logs/filter_alignments/{genome}/{raw_sample}.log"
     benchmark:
@@ -107,6 +116,7 @@ rule filter_alignments:
         workflow/scripts/Filter_alignments.sh \
             -i {input.bam} \
             -o {output.bam} \
+            -q {params.mapq} \
             2>&1 | tee {log}
         """
 

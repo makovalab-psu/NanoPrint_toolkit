@@ -159,6 +159,38 @@ def test_model_and_mad():
     assert 40000 < t["mean"][0] < 60000, t["mean"][0]
 
 
+def test_tuning_options():
+    # --scale mad: centre and spread come from the median and 1.4826 x MAD, which a
+    # heavy tail does not move; mean and SD are pulled by it.
+    tmp = tempfile.mkdtemp(prefix="mod_calling_tune_")
+    rng = np.random.default_rng(9)
+    vals = np.concatenate([rng.normal(1.0, 0.1, 5000), rng.normal(1.0, 2.0, 250)])
+    b = mc.KmerModelBuilder(max_obs=0)
+    b.add(np.full(vals.size, 7, dtype=np.int64), vals)
+    path = os.path.join(tmp, "m.tsv")
+    mc.write_model(path, {"kmer_len": 9}, b.finalize(1e9))
+    _, _, _, mean, sd = mc.load_model(path)
+    _, _, _, med, rsd = mc.load_model(path, scale="mad")
+    assert sd[0] > 0.3 and abs(rsd[0] - 0.1) < 0.02, (sd[0], rsd[0])
+    assert abs(med[0] - 1.0) < 0.01
+
+    # clean flank: None = +/-(k-1); a number narrows it; negative turns the mask off.
+    class Src(mc._Source):
+        kmer_len = 9
+        def __init__(self, flank):
+            self.need_clean, self.clean_flank = True, flank
+            self.refs = types.SimpleNamespace(
+                get=lambda name: ("", mc.seq_to_codes("ACGT" * 10)))
+    sam = FakeSam("ACGT" * 4 + "T" + "CGT" + "ACGT" * 5, [(0, 40)], 0, 40)
+    sam.reference_name = "c"
+    pos = np.arange(40)
+    n_default = int(Src(None).clean_for(sam, pos).sum())
+    n_narrow = int(Src(2).clean_for(sam, pos).sum())
+    n_off = int(Src(-1).clean_for(sam, pos).sum())
+    assert n_default == 40 - 16 - 17 and n_narrow == 40 - 4 - 5 and n_off == 40, \
+        (n_default, n_narrow, n_off)
+
+
 def test_statistics():
     z = np.array([0.0, 1.0, -2.3263478740408408, 5.0])
     p = mc.two_sided_p(z)

@@ -205,12 +205,16 @@ class ReadLevels:
 class _Source:
     """Common filtering and bookkeeping for the two backends."""
 
-    def __init__(self, bam, genome, strand, half, need_clean):
+    def __init__(self, bam, genome, strand, half, need_clean, clean_flank=None):
         self.bam = bam
         self.genome = genome
         self.want_reverse = None if strand is None else (strand == "rev")
         self.half = half
         self.need_clean = need_clean
+        # None: +/-(k-1), every k-mer that can contain the position. A smaller value
+        # keeps observations nearer an alignment error; a negative one turns the
+        # error mask off and uses every observation.
+        self.clean_flank = clean_flank
         self.refs = RefCache(genome)
         self.counts = {"candidate reads": 0, "reads used": 0, "reads failed": 0,
                        "positions without a level": 0}
@@ -225,9 +229,12 @@ class _Source:
     def clean_for(self, sam, pos):
         if not self.need_clean:
             return np.zeros(pos.size, dtype=bool)
+        flank = self.kmer_len - 1 if self.clean_flank is None else self.clean_flank
+        if flank < 0:
+            return np.ones(pos.size, dtype=bool)
         _, codes = self.refs.get(sam.reference_name)
         err = ref_error_mask(sam, codes)
-        return clean_positions(err, sam.reference_start, pos, self.kmer_len - 1)
+        return clean_positions(err, sam.reference_start, pos, flank)
 
     def report(self):
         for key, n in self.counts.items():
@@ -249,8 +256,9 @@ class Uncalled4Levels(_Source):
     """
     name = "uncalled4"
 
-    def __init__(self, bam, genome, strand=None, half="all", need_clean=False, **_):
-        super().__init__(bam, genome, strand, half, need_clean)
+    def __init__(self, bam, genome, strand=None, half="all", need_clean=False,
+                 clean_flank=None, **_):
+        super().__init__(bam, genome, strand, half, need_clean, clean_flank)
         try:
             from uncalled4 import Config, Tracks
         except ImportError as exc:
@@ -346,8 +354,8 @@ class RemoraLevels(_Source):
     BATCH = 2000
 
     def __init__(self, bam, genome, strand=None, half="all", need_clean=False,
-                 pod5=None, levels=None, context=None, **_):
-        super().__init__(bam, genome, strand, half, need_clean)
+                 pod5=None, levels=None, context=None, clean_flank=None, **_):
+        super().__init__(bam, genome, strand, half, need_clean, clean_flank)
         if not pod5:
             sys.exit("Error: the remora backend needs --pod5 (raw signal).")
         try:
@@ -490,7 +498,8 @@ def open_source(args, strand, need_clean, bam=None, pod5=None):
     cls = Uncalled4Levels if args.backend == "uncalled4" else RemoraLevels
     return cls(bam or args.bam, args.genome, strand=strand, half=args.half,
                need_clean=need_clean, pod5=pod5 or args.pod5, levels=args.levels,
-               context=args.kmer_context)
+               context=args.kmer_context,
+               clean_flank=getattr(args, "clean_flank", None))
 
 
 # ---------------------------------------------------------------------------
@@ -648,10 +657,22 @@ def write_model(path, meta, table):
                       f"\t{table['mad'][i]:.6f}\n")
 
 
-def load_model(path):
-    """-> (meta dict, kmer codes sorted, n, mean, sd)."""
+MAD_TO_SD = 1.4826          # MAD of a Gaussian, scaled to its standard deviation
+
+
+def load_model(path, scale="sd"):
+    """-> (meta dict, kmer codes sorted, n, centre, spread).
+
+    scale="sd":  centre and spread are the k-mer mean and SD (what Rembo and Tombo
+                 use).
+    scale="mad": the k-mer median and 1.4826 x MAD - the same quantities for a
+                 Gaussian, but set by the bulk of the distribution, so a heavy tail
+                 does not widen the spread the test is measured against.
+    """
     meta = {}
     kmer, n, mean, sd = [], [], [], []
+    col = (3, 4) if scale == "sd" else (5, 6)
+    factor = 1.0 if scale == "sd" else MAD_TO_SD
     with open(path) as fh:
         for line in fh:
             if line.startswith("#"):
@@ -663,8 +684,8 @@ def load_model(path):
                 continue
             kmer.append(kmer_to_code(f[0]))
             n.append(int(f[1]))
-            mean.append(float(f[3]))
-            sd.append(float(f[4]))
+            mean.append(float(f[col[0]]))
+            sd.append(float(f[col[1]]) * factor)
     kmer = np.array(kmer, dtype=np.int64)
     order = np.argsort(kmer)
     return (meta, kmer[order], np.array(n, dtype=np.int64)[order],

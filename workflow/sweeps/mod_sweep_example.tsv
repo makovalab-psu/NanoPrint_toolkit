@@ -1,0 +1,36 @@
+# Example parameter sweep for workflow/sweeps/mod_sweep.smk.
+# One factor at a time around the current defaults (the *_baseline rows), mostly at
+# a 2% false-positive rate so that sets are compared at the same background, plus
+# the unfiltered (mapq 0) variants. Tab-separated. Edit, add or delete rows freely;
+# 'set' must be unique. Columns are documented at the top of mod_sweep.smk.
+set	backend	mapq	mad	max_obs	flank	scale	min_kmer_obs	fisher_lag	threshold
+uncalled4_baseline	uncalled4	20	15	20000	default	sd	30	0	p0.02
+remora_baseline	remora	20	15	20000	default	sd	30	0	p0.02
+uncalled4_fpr02	uncalled4	20	15	20000	default	sd	30	0	fpr0.02
+remora_fpr02	remora	20	15	20000	default	sd	30	0	fpr0.02
+uncalled4_mapq0	uncalled4	0	15	20000	default	sd	30	0	p0.02
+remora_mapq0	remora	0	15	20000	default	sd	30	0	p0.02
+uncalled4_mapq0_fpr02	uncalled4	0	15	20000	default	sd	30	0	fpr0.02
+remora_mapq0_fpr02	remora	0	15	20000	default	sd	30	0	fpr0.02
+uncalled4_mapq10_fpr02	uncalled4	10	15	20000	default	sd	30	0	fpr0.02
+remora_mapq10_fpr02	remora	10	15	20000	default	sd	30	0	fpr0.02
+uncalled4_scale_mad	uncalled4	20	15	20000	default	mad	30	0	p0.02
+remora_scale_mad	remora	20	15	20000	default	mad	30	0	p0.02
+uncalled4_scale_mad_fpr02	uncalled4	20	15	20000	default	mad	30	0	fpr0.02
+remora_scale_mad_fpr02	remora	20	15	20000	default	mad	30	0	fpr0.02
+uncalled4_mad5_fpr02	uncalled4	20	5	20000	default	sd	30	0	fpr0.02
+remora_mad5_fpr02	remora	20	5	20000	default	sd	30	0	fpr0.02
+uncalled4_flank4_fpr02	uncalled4	20	15	20000	4	sd	30	0	fpr0.02
+remora_flank4_fpr02	remora	20	15	20000	4	sd	30	0	fpr0.02
+uncalled4_flank_off_fpr02	uncalled4	20	15	20000	off	sd	30	0	fpr0.02
+remora_flank_off_fpr02	remora	20	15	20000	off	sd	30	0	fpr0.02
+uncalled4_fisher1_fpr02	uncalled4	20	15	20000	default	sd	30	1	fpr0.02
+remora_fisher1_fpr02	remora	20	15	20000	default	sd	30	1	fpr0.02
+uncalled4_fisher2_fpr02	uncalled4	20	15	20000	default	sd	30	2	fpr0.02
+remora_fisher2_fpr02	remora	20	15	20000	default	sd	30	2	fpr0.02
+uncalled4_fpr01	uncalled4	20	15	20000	default	sd	30	0	fpr0.01
+remora_fpr01	remora	20	15	20000	default	sd	30	0	fpr0.01
+uncalled4_fpr005	uncalled4	20	15	20000	default	sd	30	0	fpr0.005
+remora_fpr005	remora	20	15	20000	default	sd	30	0	fpr0.005
+uncalled4_mapq0_scale_mad_fpr02	uncalled4	0	15	20000	default	mad	30	0	fpr0.02
+remora_mapq0_scale_mad_fpr02	remora	0	15	20000	default	mad	30	0	fpr0.02

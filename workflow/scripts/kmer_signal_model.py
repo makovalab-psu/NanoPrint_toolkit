@@ -48,6 +48,11 @@ def parse_args():
                    help="Uniform random sample kept per k-mer; bounds memory on deep "
                         "data (default: 20000; 0 keeps everything)")
     p.add_argument("--seed", type=int, default=1, help="Seed for that sample (default: 1)")
+    p.add_argument("--clean-flank", type=int,
+                   help="Use an observation only if the read matches the reference "
+                        "within this many bases either side of it (default: k-1, i.e. "
+                        "every k-mer that can contain the position). Smaller keeps more "
+                        "observations; -1 turns the error mask off and uses all of them.")
     return p.parse_args()
 
 
@@ -95,6 +100,7 @@ def main():
         "half": args.half,
         "mad": args.mad,
         "max_obs_per_kmer": args.max_obs_per_kmer,
+        "clean_flank": "default" if args.clean_flank is None else args.clean_flank,
         "levels": args.levels or "none",
     }
     write_model(args.output, meta, table)
