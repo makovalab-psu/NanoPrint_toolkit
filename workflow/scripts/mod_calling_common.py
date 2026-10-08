@@ -331,12 +331,13 @@ class RemoraLevels(_Source):
     indexed. The Uncalled4 BAM qualifies - it keeps those tags - and using it means
     both backends score exactly the same reads.
 
-    Without --levels there is no signal-mapping refinement: boundaries are the
-    basecaller's moves at stride resolution, and the base a level belongs to is not
-    known. With a level table (ONT kmer_models, e.g.
-    dna_r10.4.1_e8.2_400bps/9mer_levels_v1.txt) the mapping is rescaled and refined.
+    A k-mer level table (--levels; ONT kmer_models, e.g.
+    dna_r10.4.1_e8.2_400bps/9mer_levels_v1.txt) is REQUIRED. With it the signal
+    mapping is rescaled and refined. Without it the boundaries are the basecaller's
+    moves at stride resolution - 6 samples against ~12 per base - and on real data
+    the per-k-mer SD was 0.4-1.0 instead of 0.05-0.13, which is not usable.
 
-    Either way the k-mer context is a CENTRED 9-mer (4 bases each side) unless
+    The k-mer context is a CENTRED 9-mer (4 bases each side) unless
     --kmer-context says otherwise: the R10 pore has two reader heads, so the current
     at a base depends on sequence on both sides of it rather than on one dominant
     position, and the level table's own dominant position is not used for the context.
@@ -365,9 +366,15 @@ class RemoraLevels(_Source):
                 kmer_model_filename=levels, do_rough_rescale=True, scale_iters=0,
                 do_fix_guage=True)
         else:
-            sys.stderr.write("Warning: no k-mer level table (--levels); signal mapping "
-                             "is NOT refined and levels use the basecaller's moves.\n")
-            self.refiner = None
+            # Not a warning: without refinement the per-k-mer SD on real data was
+            # 0.4-1.0 against 0.05-0.13 with it (js4031), so every downstream file
+            # is written and none of it means anything.
+            sys.exit("Error: the remora backend needs a k-mer level table (--levels; "
+                     "^remora-levels in CONFIG).\n"
+                     "  Without signal mapping refinement its levels are too noisy to "
+                     "use.\n"
+                     "  ONT tables: https://github.com/nanoporetech/kmer_models "
+                     "(R10.4.1 400 bps: dna_r10.4.1_e8.2_400bps/9mer_levels_v1.txt)")
         self.context = tuple(context) if context else (4, 4)
         self.kmer_len = sum(self.context) + 1
         self.counts["reads missing from pod5"] = 0
@@ -409,8 +416,10 @@ class RemoraLevels(_Source):
         ids = {}
         for sam in sams:
             ids[sam.get_tag("pi") if sam.has_tag("pi") else sam.query_name] = None
-        for p5 in self.pod5_dr.reads(selection=list(ids), missing_ok=True,
-                                     preload=["samples"]):
+        # DatasetReader.reads() takes no missing_ok (only the single-file Reader
+        # does); it already skips ids a file does not hold. Reads absent from every
+        # file simply never come back, and are counted below.
+        for p5 in self.pod5_dr.reads(selection=list(ids), preload=["samples"]):
             ids[str(p5.read_id)] = p5
         for sam in sams:
             p5 = ids[sam.get_tag("pi") if sam.has_tag("pi") else sam.query_name]
@@ -446,7 +455,9 @@ class RemoraLevels(_Source):
             yield from self._batch(batch)
 
     def close(self):
-        self.pod5_dr.close()
+        # DatasetReader has no close(); its context-manager exit is what releases
+        # the cached file readers.
+        self.pod5_dr.__exit__(None, None, None)
         self.refs.close()
 
 
@@ -465,7 +476,7 @@ def add_backend_args(p, multi=False):
                    help="remora: pod5 file or directory (searched recursively)"
                         + ("; one per BAM, in the same order" if multi else ""))
     p.add_argument("--levels", help="remora: k-mer level table for signal mapping "
-                                    "refinement (ONT kmer_models). Omit to use raw moves.")
+                                    "refinement (ONT kmer_models). Required for remora.")
     p.add_argument("--kmer-context", type=int, nargs=2, metavar=("BEFORE", "AFTER"),
                    help="remora: bases before/after the level's base that define the "
                         "k-mer (default: 4 4, a centred 9-mer)")
@@ -522,8 +533,11 @@ def cutoff_from_hists(paths, fpr, expect_meta):
                     hist[int(round(float(lower) / HIST_WIDTH))] += int(count)
     total = int(hist.sum())
     if total == 0:
-        sys.exit("Error: the null histograms hold no observations; a false-positive "
-                 "rate cannot be estimated from an empty held-out control.")
+        # An empty held-out control: a sample with no reads on this reference. There
+        # is no null to estimate from, so nothing can be called.
+        sys.stderr.write("Warning: the null histograms hold no observations; no "
+                         "cutoff can be estimated, so nothing will be called.\n")
+        return float("inf"), 0
     tail = np.cumsum(hist[::-1])[::-1]          # observations in bin i or above
     first = int(np.argmax(tail <= fpr * total)) if (tail <= fpr * total).any() \
         else HIST_BINS + 1

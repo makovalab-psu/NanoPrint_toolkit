@@ -2336,7 +2336,7 @@ Input format (tab-delimited):
     Sample  Statistic  Raw_alignment  Filtered_alignment
 
 Output format (CSV with header):
-    Sample, Filter_status, Total_sequences, Total_length, Bases_mapped,
+    Sample, Genome, Filter_status, Total_sequences, Total_length, Bases_mapped,
     Bases_mapped_cigar, Mismatches, Error_rate, Average_length, Average_quality,
     Primary_alignments, Secondary_alignments, Supplementary_alignments
 

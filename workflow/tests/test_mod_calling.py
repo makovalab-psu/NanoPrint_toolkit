@@ -84,10 +84,12 @@ class FakeSource:
         self.reads = reads
         self.half = half
         self.refs = mc.RefCache(fasta)
+        self.counts = {"candidate reads": 0}
 
     def __iter__(self):
         for r in self.reads:
             if self.half == "all" or mc.read_half(r.read_id) == self.half:
+                self.counts["candidate reads"] += 1
                 yield r
 
     def report(self):
@@ -333,6 +335,34 @@ def test_end_to_end():
     assert p_kmer.size == 194
     assert np.allclose(p_mean, LEVEL[p_kmer] + 0.1, atol=0.03)
     assert np.allclose(p_sd, math.sqrt(NOISE ** 2 + 0.1 ** 2), rtol=0.15)
+
+    # A sample with no reads on a reference (a B-DNA library on the PolyT reverse
+    # complement) gives an empty model, and everything scored against it comes out
+    # empty - without failing the workflow.
+    empty_model = os.path.join(tmp, "empty_model.tsv")
+    run(kmer_signal_model, common + ["--half", "A", "-o", empty_model],
+        lambda strand, bam: [])
+    assert mc.load_model(empty_model)[1].size == 0
+    empty_calls = os.path.join(tmp, "empty_calls.txt.gz")
+    empty_hist = os.path.join(tmp, "empty.hist.tsv")
+    run(perbase_mod_calls,
+        common + ["-m", empty_model, "-s", "for", "-o", empty_calls,
+                  "--hist-out", empty_hist], lambda s, bam: treated[s][:50])
+    assert read_table(empty_calls) == []
+    cutoff, n_null = mc.cutoff_from_hists(
+        [empty_hist], 0.02, {"statistic": "absz", "fisher_lag": 0})
+    assert cutoff == float("inf") and n_null == 0
+    # ... but reads that yield no clean k-mer at all are still an error.
+    dirty = [mc.ReadLevels(r.ref, r.start, r.read_id, r.pos, r.level, r.kmer,
+                           np.zeros(r.pos.size, dtype=bool))
+             for r in control["for"][:20]]
+    try:
+        run(kmer_signal_model, common + ["--half", "all", "-o", empty_model],
+            lambda strand, bam: dirty)
+    except SystemExit as exc:
+        assert "none had an error-free" in str(exc)
+    else:
+        raise AssertionError("reads with no clean k-mer must be an error")
 
     # Reactivity: merge across two contigs, treatment minus control.
     react = os.path.join(tmp, "react.txt.gz")

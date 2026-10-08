@@ -1874,7 +1874,7 @@ Remora has no sample-comparison test — the statistics are ported into
 ^mod-calls	uncalled4
 ^mod-calls	remora
 ^pod5	<raw_sample>	/path/to/pod5        # raw signal for a ^u sample (remora only)
-^remora-levels	/path/to/9mer_levels_v1.txt  # optional: Remora signal mapping refinement
+^remora-levels	/path/to/9mer_levels_v1.txt  # REQUIRED with remora: signal mapping refinement
 ^mod-pool	<name>	<control>	<control> ...    # optional: a model pooled over controls
 ```
 
@@ -1883,8 +1883,8 @@ Remora has no sample-comparison test — the statistics are ported into
 | | `uncalled4` | `remora` |
 |---|---|---|
 | Level | `dtw.current` from the Uncalled4 BAM | `trimmean` from `Read.compute_per_base_metric` |
-| Mapping | Uncalled4 DTW | move table, refined against `^remora-levels` if given |
-| K-mer | `seq.kmer` (pore model 9-mer, shift 6) | centred 9-mer (4+1+4), with or without a level table; `--kmer-context` overrides |
+| Mapping | Uncalled4 DTW | move table, refined against `^remora-levels` (required) |
+| K-mer | `seq.kmer` (pore model 9-mer, shift 6) | centred 9-mer (4+1+4); `--kmer-context` overrides |
 | Needs | `has_signal()` | that, plus pod5 (`^r` path or `^pod5`), `ont-remora`, `pod5` |
 
 The remora backend reads the **Uncalled4 BAM** as its alignment (it keeps `mv`/`ts`), so
@@ -2088,3 +2088,57 @@ silent exit. `react_dens.sh` had the identical line and got the same two changes
 Tested: no-null header with data → placeholder; no data → placeholder; header missing
 only the requested level → exit 1 with message; `5e-04` threshold → parsed, bigWig
 written; the two earlier cases unchanged.
+
+### Phases 2c/3c: first run on real data (js4031, 2026-10-08, hermes)
+
+**uncalled4 backend: works.** `aln.dtw.current` / `aln.seq.kmer` / `aln.seq.pos` decode
+at equal length, no k-mer encoding warning, 0 reads failed. Example,
+`dGd_G4-0mMMnO4_js4021-1` on `PolyT_reverse_complement`: 93,661 half-A reads, 6.88 M
+observations of which 4.70 M (68%) sit in error-free k-mers, 240 k-mers modelled, 2,508
+removed by the 15-MAD filter. Every model on the correct reference built.
+
+**The held-out control is NOT at 2%:** the same sample scored on half B came out at
+**3.62% modified** at p < 0.02. The Gaussian null understates the tails of the real level
+distribution by nearly a factor of two. Nothing is broken — this is the case `mod_fpr`
+exists for — but it means p < 0.02 and fpr 0.02 are genuinely different thresholds on
+this data, and the control's modified fraction must be subtracted, never assumed.
+
+**remora backend: every job failed** on
+`TypeError: DatasetReader.reads() got an unexpected keyword argument 'missing_ok'`.
+Only the single-file `pod5.Reader.reads()` takes `missing_ok`; `DatasetReader.reads()`
+(pod5 0.3.49, `dataset.py`) takes `selection` and `preload` and passes
+`missing_ok=True` to each file's reader itself. Argument removed. Written from memory of
+the wrong class's signature, with pod5 not installed to check against.
+
+**A sample with no reads on a reference is no longer a failed job.**
+`dGd_B-DNA-0mMMnO4_js4021-1` has 0 reads on `PolyT_reverse_complement`, and
+`kmer_signal_model.py` exited 1 on the empty model, which fails the workflow's exit
+status for an off-target pair. Now, matching the phase 0 convention: **0 candidate
+reads** → warning, empty model, exit 0; `perbase_mod_calls.py` against an empty model →
+warning, empty output; an fpr cutoff from an empty null → infinity, nothing called.
+Reads present but none with an error-free k-mer is still a hard error — that is not an
+empty sample.
+
+**`^mod-pool` lines split on any whitespace**, not only tabs: a line pasted from a chat
+arrives with spaces, and tab-only splitting glued it into one long pool name.
+
+**The Remora level table is required, not optional (2026-10-08).** The first Remora
+model that built, without `^remora-levels`, had per-k-mer SDs of 0.4-1.0 where the
+k-mer means span ~2 units, and means that disagreed with medians. With
+`kmer_models/dna_r10.4.1_e8.2_400bps/9mer_levels_v1.txt` the same k-mers came out at
+0.05-0.13 (AAAACCCGC 1.00 -> 0.11; AAAGGGGGC 1.06 -> 0.05), the same order as
+uncalled4. Unrefined, base boundaries are the basecaller's moves at a stride of 6
+samples against ~12 samples per base. The workflow ran to completion either way, which
+is the problem: `CONFIG.sh` now exits if `^mod-calls remora` has no `^remora-levels`,
+and `RemoraLevels` exits if `--levels` is missing, so a remora target requested by
+name cannot bypass it either. A table path that does not exist yet is still only a
+warning, like every other not-yet-staged input.
+
+**Results of the first full run** (both backends, matched and pooled, p0.02 and fpr0.02)
+are summarised in the js4031 project `CLAUDE.md`: held-out controls at 3.5-4.6% under
+p < 0.02 and ~2% under fpr 0.02 (cutoff |z| > 2.9-3.1 in both backends); treated PolyT
+strand 5-6% against ~2%; the two backends agree. **Several defaults are due a second
+look before these numbers are used** (Jacob, 2026-10-08) - nothing has been decided:
+`mod_pval`/`mod_fpr` and the global cutoff, `mod_min_kmer_obs` (30),
+`mod_max_obs_per_kmer` (20000), `mod_mad` (15), the +/-(k-1) clean flank, the Remora
+k-mer context (4,4) and trim, and Fisher smoothing (off).

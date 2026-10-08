@@ -236,7 +236,12 @@ def main():
         print(f"Called modified:           {n_called} ({n_called / n_scored:.4%})")
     if out:
         print(f"Positions written:         {written}")
-    if n_obs > 0 and n_scored == 0:
+    if m_kmer.size == 0:
+        # The model was built from a sample with no reads on this reference; see
+        # kmer_signal_model.py. Nothing can be scored, and that is the right answer.
+        print("Warning: the model is empty (its control has no reads on this "
+              "reference); no positions were scored.")
+    elif n_obs > 0 and n_scored == 0:
         sys.exit("Error: observations were read but none could be scored - no k-mer "
                  "in this sample is in the model with enough observations. Check that "
                  "the model was built on the same reference, and --min-kmer-obs.")

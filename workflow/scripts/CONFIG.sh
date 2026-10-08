@@ -233,8 +233,17 @@ while IFS= read -r line || [[ -n "$line" ]]; do
                 ;;
             "^mod-pool")
                 # Pooled control model: pool name, then two or more raw_sample names.
-                POOL_NAMES+=("$(echo "$values" | cut -f1 | tr -d ' ')")
-                POOL_MEMBERS+=("$(echo "$values" | cut -f2- | tr '\t' ' ')")
+                # Split on ANY whitespace, not just tabs: none of these names can
+                # contain a space, and a line pasted from a terminal or a chat
+                # arrives with its tabs turned into spaces. Splitting on tabs only
+                # glued such a line into one long "name" (js4031).
+                pool_fields=($values)
+                if [[ ${#pool_fields[@]} -eq 0 ]]; then
+                    echo "Error: ^mod-pool line has no pool name." >&2
+                    exit 1
+                fi
+                POOL_NAMES+=("${pool_fields[0]}")
+                POOL_MEMBERS+=("${pool_fields[*]:1}")
                 ;;
         esac
     fi
@@ -416,6 +425,22 @@ for i in "${!POOL_NAMES[@]}"; do
             exit 1
         fi
     done
+done
+
+# The remora backend is not usable without a k-mer level table. Without one Remora
+# takes base boundaries straight from the basecaller's move table, and on js4031 the
+# per-k-mer SD came out at 0.4-1.0 against 0.05-0.13 with the table: the workflow ran,
+# wrote plausible-looking files, and they carried almost no information. So a missing
+# ^remora-levels is an error here, not a warning in a log nobody reads.
+for b in "${UNIQUE_MOD_BACKENDS[@]+"${UNIQUE_MOD_BACKENDS[@]}"}"; do
+    if [[ "$b" == "remora" && -z "$REMORA_LEVELS" ]]; then
+        echo "Error: '^mod-calls remora' needs a k-mer level table, and CONFIG has no ^remora-levels line." >&2
+        echo "  Without signal mapping refinement the remora backend's output is not usable." >&2
+        echo "  Get the ONT table:  git clone https://github.com/nanoporetech/kmer_models.git" >&2
+        echo "  and add (tab-separated), for R10.4.1 400 bps:" >&2
+        echo "    ^remora-levels	/path/to/kmer_models/dna_r10.4.1_e8.2_400bps/9mer_levels_v1.txt" >&2
+        exit 1
+    fi
 done
 
 if [[ -n "$REMORA_LEVELS" && ! -f "$REMORA_LEVELS" ]]; then

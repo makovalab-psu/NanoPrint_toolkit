@@ -72,7 +72,7 @@ def main():
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
 
     builder = KmerModelBuilder(max_obs=args.max_obs_per_kmer, seed=args.seed)
-    n_obs = 0
+    n_obs = n_candidates = 0
     for bam, pod5 in zip(args.bam, pod5s):
         sys.stderr.write(f"--- {bam}\n")
         source = open_source(args, strand=None, need_clean=True, bam=bam, pod5=pod5)
@@ -80,8 +80,11 @@ def main():
             n_obs += read.pos.size
             use = read.clean & (read.kmer >= 0)
             builder.add(read.kmer[use], read.level[use])
-        source.close()
+        # Report before closing: the read counts are the first thing needed if
+        # anything about the source goes wrong, including in close() itself.
         source.report()
+        n_candidates += source.counts["candidate reads"]
+        source.close()
 
     table = builder.finalize(args.mad)
     meta = {
@@ -103,11 +106,17 @@ def main():
     if table["kmer"].size:
         print(f"Removed by the {args.mad:g}-MAD filter:        "
               f"{int(table['n_outlier'].sum())}")
-    if builder.seen == 0:
-        # Reads were decoded (source.report() would have exited otherwise) yet none
-        # had an error-free k-mer. An empty model scores nothing downstream and the
-        # tracks would simply come out empty.
-        sys.exit("Error: no error-free k-mer observations; the model is empty.")
+    if builder.seen == 0 and n_candidates == 0:
+        # No reads at all: the sample does not contain this reference (a B-DNA
+        # library on the PolyT reverse complement). Same convention as the phase 0
+        # scripts - a warning and an empty result, not a failed workflow.
+        print("Warning: no reads on this reference; the model is empty. Samples "
+              "scored against it will come out empty.")
+    elif builder.seen == 0:
+        # Reads were decoded yet none had an error-free k-mer. That is not an empty
+        # sample, it is something wrong, and an empty model would hide it.
+        sys.exit(f"Error: {n_candidates} reads were read but none had an error-free "
+                 f"k-mer observation; the model is empty.")
     print("Done.")
 
 
