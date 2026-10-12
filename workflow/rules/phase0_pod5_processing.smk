@@ -20,6 +20,10 @@ import os
 if "UNCALLED4_PATHS" not in globals():
     UNCALLED4_PATHS = {}
 
+# Likewise ^filter-mapq. 0 is the default CONFIG.sh writes (see the note there).
+if "FILTER_MAPQ" not in globals():
+    FILTER_MAPQ = 0
+
 
 def get_pod5_dir(raw_sample):
     """Return the pod5 source path for a sample, or None if not pod5 input.

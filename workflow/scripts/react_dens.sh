@@ -135,7 +135,9 @@ esac
 echo "Parsing significance threshold from header..."
 # Extract threshold value from header
 # Header format: # p < 0.05 (black):    reactivity >= 0.002886645
-THRESHOLD=$(grep "$SIG_PATTERN" "$INPUT" | grep -oE '[0-9]+\.[0-9e+-]+$' | head -1)
+# '|| true' so a missing threshold reaches the error message below instead of
+# ending the script silently under 'set -euo pipefail' (see bg_to_bw.sh).
+THRESHOLD=$(grep "$SIG_PATTERN" "$INPUT" | grep -oE '[0-9][0-9.e+-]*$' | head -1 || true)
 
 if [[ -z "$THRESHOLD" ]]; then
     echo "Error: Could not find threshold for '$SIG_PATTERN' in header" >&2

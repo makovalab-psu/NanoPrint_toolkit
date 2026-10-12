@@ -1,3 +1,17 @@
+# Tests for direct modification calling (phases 2c/3c)
+
+```bash
+python3 workflow/tests/test_mod_calling.py      # numpy + pysam only; ~1 min
+```
+
+`test_mod_calling.py` needs no data and neither uncalled4 nor remora. It feeds simulated
+reads through a stand-in for the two backends and checks everything they share: k-mer
+encoding, the alignment-error mask, the k-mer model and its MAD filter, the z/p test,
+Fisher's method, the per-position accumulator, `kmer_signal_model.py` and
+`perbase_mod_calls.py` end to end (held-out control ≈ 2% modified; planted sites
+recovered), and `mod_reactivity.py`. It does **not** exercise the backends themselves —
+decoding a real Uncalled4 BAM or pod5 through Remora.
+
 # Regression tests for `perbase_signal_deviation`
 
 These test the DTW signal branch — `perbase_signal_deviation.py` reading an Uncalled4

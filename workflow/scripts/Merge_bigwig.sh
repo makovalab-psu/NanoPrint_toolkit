@@ -140,6 +140,11 @@ for f in "${INPUT_FILES[@]}"; do
         echo "Warning: Input file not found, skipping: $f" >&2
         continue
     fi
+    if [[ ! -s "$f" ]]; then
+        # 0-byte placeholder from bg_to_bw.sh: no position passed the filter there.
+        echo "Note: empty placeholder (no positions passed the filter), skipping: $f"
+        continue
+    fi
     # Extract chromosome from filename (format: {sample}_{strand}_{chr}.bw)
     # Strand is always 'for' or 'rev', use it as delimiter since chr may contain underscores
     base=$(basename "$f")
@@ -164,7 +169,10 @@ MERGED_BG="${TMP_DIR}/merged.bg"
 
 merged_count=0
 while read -r chr size rest; do
-    bw_file=$(get_file_for_chr "$chr")
+    # '|| true': get_file_for_chr returns 1 for a chromosome with no input file,
+    # and under 'set -e' a failing command substitution in an assignment ends the
+    # script on the spot, with no message.
+    bw_file=$(get_file_for_chr "$chr" || true)
     if [[ -n "$bw_file" ]]; then
         tmp_bg="${TMP_DIR}/${chr}.bg"
 
@@ -184,6 +192,14 @@ echo "Merged $merged_count chromosomes"
 # per-chromosome bigWig is internally position-sorted (bedGraphToBigWig requires
 # sorted input to create them). Sorting the full merged file is redundant and
 # can OOM-kill on large genomes.
+
+if [[ ! -s "$MERGED_BG" ]]; then
+    # Every chromosome was an empty placeholder. Same convention: a 0-byte output,
+    # because bedGraphToBigWig cannot write a bigWig with no records.
+    echo "Warning: no positions on any chromosome. Writing an empty placeholder: $OUTPUT" >&2
+    : > "$OUTPUT"
+    exit 0
+fi
 
 # Convert to bigWig
 echo "Converting to bigWig..."

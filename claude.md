@@ -1854,3 +1854,478 @@ passing a healthy one.
 `js4022_.../20261002_submit_nanoprint.sh` is the hand-written reference implementation
 this was derived from, and additionally carries a disk precheck for the phase 6 split
 BAMs.
+
+### Phases 2c/3c: direct modification calling by sample comparison (js4031, Oct 2026)
+
+A third readout next to per-base error and DTW signal deviation: every read is tested
+base by base against a canonical k-mer signal model built from the relationship's
+control, and the track is the **fraction of reads called modified**. The method is
+Rembo's (P2-seq preprint: per-k-mer n/mean/SD from the untreated sample after a 15-MAD
+filter, restricted to k-mers aligned without mismatch or indel; z-score; two-sided
+Gaussian p; modified at p < 0.02). The test is Tombo's `model_sample_compare`
+(`tombo_stats.py compute_sample_compare_read_stats`), including optional Fisher's-method
+smoothing along the read. Neither tool is a dependency — Tombo cannot read POD5/R10 and
+Remora has no sample-comparison test — the statistics are ported into
+`workflow/scripts/mod_calling_common.py`.
+
+**Enabled by CONFIG, off by default:**
+
+```
+^mod-calls	uncalled4
+^mod-calls	remora
+^pod5	<raw_sample>	/path/to/pod5        # raw signal for a ^u sample (remora only)
+^remora-levels	/path/to/9mer_levels_v1.txt  # REQUIRED with remora: signal mapping refinement
+^mod-pool	<name>	<control>	<control> ...    # optional: a model pooled over controls
+```
+
+**Two backends, one test.** Both hand the shared code `(position, level, k-mer)` per read:
+
+| | `uncalled4` | `remora` |
+|---|---|---|
+| Level | `dtw.current` from the Uncalled4 BAM | `trimmean` from `Read.compute_per_base_metric` |
+| Mapping | Uncalled4 DTW | move table, refined against `^remora-levels` (required) |
+| K-mer | `seq.kmer` (pore model 9-mer, shift 6) | centred 9-mer (4+1+4); `--kmer-context` overrides |
+| Needs | `has_signal()` | that, plus pod5 (`^r` path or `^pod5`), `ont-remora`, `pod5` |
+
+The remora backend reads the **Uncalled4 BAM** as its alignment (it keeps `mv`/`ts`), so
+both backends score exactly the same reads. No MD tag is needed: Remora's
+`get_reference_sequence()` wants one and minimap2 is not run with `--MD`, so `ref_seq` is
+filled from the FASTA and `compute_ref_to_signal()` re-run. A model is refused by
+`perbase_mod_calls.py` unless backend, k, k-mer context and level table all match the run
+— levels from the two backends differ in units and in which base they belong to.
+
+**Files:**
+
+```
+data/kmer_model/{backend}/{genome}/{model}.tsv                                      kmer_signal_model
+data/perbase_mod_null/{backend}/{genome}/{member}_vs_{model}_{strand}.hist.tsv      perbase_mod_null (fpr only)
+data/perbase_mod/{backend}/{genome}/{thr}/{raw_sample}_vs_{model}_{strand}.txt.gz   perbase_mod_calls
+data/mod_reactivity/{backend}/{genome}/{thr}/{model_set}/{sample}_{strand}.txt.gz   calculate_mod_reactivity
+```
+
+`{model}` is a control's raw_sample name or a `^mod-pool` name; `{model_set}` is
+`matched` or the pool name; `{thr}` is `p0.02`, `fpr0.02`, … from `mod_pval` / `mod_fpr`.
+
+`perbase_mod` columns: chr, pos, nt, coverage, modified fraction, modified reads, mean z,
+mean |z| (1–5 match perbase_error). `mod_reactivity`: chr, pos, nt, treatment − control
+modified fraction, then both coverages and both fractions. Whole-genome files merged by
+contig and position in `mod_reactivity.py` — no per-chromosome split, so no
+`genome_specific_rules.smk` entry.
+
+**Design decisions worth keeping:**
+
+- **The control is scored on reads the model never saw.** Reads are split in two by
+  `crc32(read name)`: the model takes half A, the control is scored on half B
+  (`--half`), the treatment on all reads. Scoring the control against a model built from
+  the same reads is circular and understates the background.
+- **Matched and pooled control models are built side by side.** `matched` is the
+  relationship's own control. `^mod-pool` builds one model from several controls
+  (`kmer_signal_model.py -i a.bam b.bam …`) for every relationship whose control is a
+  member; members are scored on their held-out half B. Reactivity under the two is the
+  sample-to-sample reproducibility of the canonical signal: a batch offset between
+  controls widens the pooled SD and shifts its mean, so pooled calls lose sensitivity
+  and the control's own modified fraction moves off the threshold. For a direct
+  control-vs-control check, request `data/perbase_mod/…/{thr}/{ctrlB}_vs_{ctrlA}_{strand}.txt.gz`
+  by name — a control that is not in the model is scored on all its reads.
+- **Two ways to set the call threshold, selectable together.** `mod_pval` (default
+  0.02) trusts the Gaussian null. `mod_fpr` takes the cutoff that fraction of the
+  model's held-out control reads exceed: `perbase_mod_null` histograms the statistic
+  (|z|, or −log10 p under Fisher) for each member's half B, both strands, in 0.01 bins,
+  and `perbase_mod_calls.py --fpr F --null-hist …` pools them. One global cutoff, not
+  per position or per k-mer. The histogram records the model path, statistic and Fisher
+  lag and is refused if they differ. Each threshold writes under its own `{thr}/`.
+- **The Remora k-mer is a centred 9-mer.** The R10 pore has two reader heads, so there
+  is no single dominant base; the level table's `determine_dominant_pos` is not used
+  for the context.
+- **Background is ~the p-value threshold, not zero.** A Gaussian null flags 2% of
+  unmodified observations at p < 0.02 by construction. The control's modified fraction
+  measures it; reactivity subtracts it.
+- **The mismatch/indel filter applies to the model only.** A modified base is what makes
+  the basecaller err, so filtering the scored sample would remove the signal. The mask
+  is from CIGAR + query + reference with a ±(k−1) flank, which covers every k-mer that
+  can contain the position whichever base the level is registered to.
+- **On a short reference the "k-mer" model is a per-position model** — a few hundred
+  9-mers, each at one position and strand. Correct there, but not transferable; the
+  k-mer keying is what makes the same code meaningful on a plasmid or genome.
+- **`--max-obs-per-kmer` (20000) is an exact uniform sample**, by random priority, not
+  "the first N" — a coordinate-sorted BAM would otherwise fill each k-mer from one locus.
+- **A requested backend that cannot run prints a WARNING at parse time** naming the
+  relationship, instead of dropping out of the DAG (the js4022 `^s` lesson).
+- Thresholds are `--config` keys: `mod_pval`, `mod_mad`, `mod_min_kmer_obs`,
+  `mod_fisher_lag`, `mod_max_obs_per_kmer`, `mod_per_read` (per-read z/p table, written
+  under `data/perbase_mod_reads/`, untracked).
+
+**Tested / not tested (2026-10-07).** `workflow/tests/test_mod_calling.py` runs the
+shared code and all three scripts on simulated reads through a stand-in source: the
+held-out control comes back at 2.0% modified, planted 60% and 25% sites are recovered,
+a model from the other backend is refused, an fpr of 0.02 on a Gaussian null lands on
+|z| > 2.33 (and above 4 on a t(3) null), and a model pooled over two controls offset by
+a batch effect has the expected mean and widened SD. A snakemake 9.27 dry run with two
+`^u` relationships, `^pod5`, a `^mod-pool` and `mod_fpr=0.02` schedules, per backend,
+3 models, 8 null histograms, 32 call jobs and 16 reactivity jobs.
+**Neither backend has been run on real data** — written without uncalled4, pod5 or
+remora installed. First run, check in this order:
+
+1. uncalled4: `aln.dtw.current` and `aln.seq.kmer` decode with `layers=["dtw"]` and are
+   the same length as `aln.seq.pos` (the script exits if not). No start-up warning about
+   the k-mer encoding.
+2. remora: reads are found in the pod5 (`reads missing from pod5: 0`), `reads failed`
+   is a small minority, and positions line up — a strongly reactive T should sit within
+   a few bases of the same T in the uncalled4 track.
+3. Both: held-out control modified fraction ≈ `mod_pval`; mean z ≈ 0.
+
+### TO CHECK: concatemer reads may bias against modified units (js4031, Oct 2026)
+
+**Status: open question, not measured. No code changed.**
+
+Short blunt-ended duplexes ligate to each other during LSK114 library prep, so many
+reads are concatemers of the ~88-nt unit. The reference is one unit long, so minimap2
+reports one **primary** alignment (the best-scoring unit) and the others as
+**supplementary**. `Filter_alignments.sh` is hardcoded to
+`samtools view -q 20 -F 0x100 -F 0x800`, so only the primary survives and Uncalled4
+aligns signal for that one unit.
+
+Measured on `dGd_B-DNA-5mMMnO4_js4021-2` vs `G4_strand` (`samtools flagstat`, aligned BAM):
+
+| | Count |
+|---|---|
+| Reads | 871,786 |
+| Primary mapped | 562,147 (64.5%) |
+| Unmapped | 309,639 (35.5%) |
+| Supplementary | 376,105 — 40% of all aligned units |
+
+**The concern (Jacob):** the primary is the best-scoring unit, and permanganate-modified
+bases cause basecall errors, which lower the alignment score. In a treated sample a
+concatemer's unmodified unit would be kept over its modified one, biasing every track —
+per-base error, DTW signal and modification rate — toward lower reactivity. The control
+is unaffected, so the bias would not cancel in treatment − control.
+
+**Decision:** leave the filter alone. Depth is not the issue (~90k reads per construct
+per strand without the supplementary units), and keeping them risks breaking Uncalled4
+and Remora:
+- minimap2 hard-clips supplementary records by default while the `mv` tag copied onto
+  each record still describes the whole read; `-Y` (soft clip) would be needed in
+  `Map_reads.sh`.
+- Whether `uncalled4 align` correctly handles several alignments of one read is
+  unverified (its source does not filter on the supplementary flag).
+- `RemoraLevels` skips supplementary records, and `^u` handling, QC and the notes
+  above all assume one record per read.
+
+**The check to run, after the js4031 run finishes:** compare per-base error (and
+modified fraction) in a treated sample between
+1. reads with **no** supplementary alignment — single units, no selection possible, and
+2. primaries from reads that **do** have a supplementary alignment (`SA` tag present).
+
+Split the filtered BAM on the `SA` tag (`samtools view -d SA` / `-e '![SA]'`) and run
+`perbase_error.sh` on each half. Do the same split on the matching control as the
+null. If (2) is less reactive than (1) in the treated sample but not in the control,
+the bias is real. Then the options are: restrict the analysis to single-unit reads
+(simple, costs depth), or add an opt-in setting to keep supplementary units (`-Y` in
+mapping, configurable filter flag, and a proof on concatemer reads that each unit's
+signal lands on the right reference positions in both backends).
+
+**Also unexplained: 35.5% of reads do not map.** Likely very short or adapter-only
+reads, possibly the `lr:hq` preset failing to seed on fragments shorter than a unit.
+Look at the length distribution of the unmapped reads (`samtools view -f 4`).
+
+### bigWig steps: "no positions passed the filter" is not an error (js4031, Oct 2026)
+
+`bg_to_bw.sh` exited 1 when no position cleared the significance threshold, which
+stopped the whole js4031 run at 15:13 on 2026-10-07:
+
+```
+Significance level: p < 0.01
+Reactivity threshold: >= 0.0145786
+Error: No positions passed the filter. Cannot create bigWig.
+```
+
+On a genome that never happens — some position always passes. On an 86-nt contig it
+is ordinary, and it is guaranteed for a sample on a reference it does not contain:
+the failing jobs were `dGd_G4-5mMMnO4_js4001-3` on `Reverse_complement` (a G4 library
+has no perfect reverse complement) and on the `rev` strand of `G4_strand` (the same
+missing strand seen from the other reference).
+
+**Fix:** `bg_to_bw.sh` now warns, writes a **0-byte placeholder** and exits 0 — the
+convention `igv_coverage_bigwig` already uses, since `bedGraphToBigWig` cannot write
+an empty bigWig. `Merge_bigwig.sh` skips 0-byte inputs, and writes a 0-byte output
+itself when every chromosome was empty. The warning reports how many positions the
+input held, so "nothing passed" is distinguishable from "nothing was there".
+
+**A second bug this uncovered in `Merge_bigwig.sh`:** `bw_file=$(get_file_for_chr "$chr")`
+under `set -euo pipefail`. The function returns 1 for a chromosome with no input file,
+and a failing command substitution in a plain assignment ends the script immediately
+with no message — the log just stops after "Converting bigWig files...". It had never
+fired because every chromosome always had a file. Now `$(get_file_for_chr "$chr" || true)`.
+
+Tested with the real UCSC tools: nothing passes → 0-byte file, exit 0; one empty + one
+real → merged bigWig holding the real chromosome; all empty → 0-byte output, exit 0;
+all real → unchanged. **A 0-byte `.bw` is not a valid bigWig**: IGV and
+`bigWigToBedGraph` will refuse it, so check file size before loading these tracks.
+
+**Same day, second failure in the same script — the silent one.** The log ended at
+`Parsing significance threshold from header...` with exit 1 and no error text. Cause:
+
+```bash
+THRESHOLD=$(grep "$SIG_PATTERN" "$INPUT" | grep -oE '...' | head -1)
+```
+
+When `react_to_bg.sh` finds no negative reactivity values it has no null distribution,
+so it writes the header `# Reactivity bedGraph - No significance thresholds (null
+distribution empty)` with no `p < ...` lines. `grep` then matches nothing, `pipefail`
+fails the pipeline, and `set -e` ends the script inside the assignment — before the
+"Could not find threshold" message two lines below could ever print. This is the third
+instance of one pattern in this file (`((var++))`, `get_file_for_chr`, now this):
+**under `set -euo pipefail`, a command substitution that can legitimately fail needs
+`|| true`, and the emptiness check after it is what reports the problem.**
+
+Now: `|| true` on the substitution; a bedGraph with the no-thresholds header (or no
+data lines) gets the 0-byte placeholder and a warning; a header that should have had
+the threshold and does not is still a hard error, with the header printed. The number
+pattern was also widened from `[0-9]+\.[0-9e+-]+` to `[0-9][0-9.e+-]*` — the old one
+could not match a threshold R prints as `5e-04` or `0`, which would have hit the same
+silent exit. `react_dens.sh` had the identical line and got the same two changes.
+
+Tested: no-null header with data → placeholder; no data → placeholder; header missing
+only the requested level → exit 1 with message; `5e-04` threshold → parsed, bigWig
+written; the two earlier cases unchanged.
+
+### Phases 2c/3c: first run on real data (js4031, 2026-10-08, hermes)
+
+**uncalled4 backend: works.** `aln.dtw.current` / `aln.seq.kmer` / `aln.seq.pos` decode
+at equal length, no k-mer encoding warning, 0 reads failed. Example,
+`dGd_G4-0mMMnO4_js4021-1` on `PolyT_reverse_complement`: 93,661 half-A reads, 6.88 M
+observations of which 4.70 M (68%) sit in error-free k-mers, 240 k-mers modelled, 2,508
+removed by the 15-MAD filter. Every model on the correct reference built.
+
+**The held-out control is NOT at 2%:** the same sample scored on half B came out at
+**3.62% modified** at p < 0.02. The Gaussian null understates the tails of the real level
+distribution by nearly a factor of two. Nothing is broken — this is the case `mod_fpr`
+exists for — but it means p < 0.02 and fpr 0.02 are genuinely different thresholds on
+this data, and the control's modified fraction must be subtracted, never assumed.
+
+**remora backend: every job failed** on
+`TypeError: DatasetReader.reads() got an unexpected keyword argument 'missing_ok'`.
+Only the single-file `pod5.Reader.reads()` takes `missing_ok`; `DatasetReader.reads()`
+(pod5 0.3.49, `dataset.py`) takes `selection` and `preload` and passes
+`missing_ok=True` to each file's reader itself. Argument removed. Written from memory of
+the wrong class's signature, with pod5 not installed to check against.
+
+**A sample with no reads on a reference is no longer a failed job.**
+`dGd_B-DNA-0mMMnO4_js4021-1` has 0 reads on `PolyT_reverse_complement`, and
+`kmer_signal_model.py` exited 1 on the empty model, which fails the workflow's exit
+status for an off-target pair. Now, matching the phase 0 convention: **0 candidate
+reads** → warning, empty model, exit 0; `perbase_mod_calls.py` against an empty model →
+warning, empty output; an fpr cutoff from an empty null → infinity, nothing called.
+Reads present but none with an error-free k-mer is still a hard error — that is not an
+empty sample.
+
+**`^mod-pool` lines split on any whitespace**, not only tabs: a line pasted from a chat
+arrives with spaces, and tab-only splitting glued it into one long pool name.
+
+**The Remora level table is required, not optional (2026-10-08).** The first Remora
+model that built, without `^remora-levels`, had per-k-mer SDs of 0.4-1.0 where the
+k-mer means span ~2 units, and means that disagreed with medians. With
+`kmer_models/dna_r10.4.1_e8.2_400bps/9mer_levels_v1.txt` the same k-mers came out at
+0.05-0.13 (AAAACCCGC 1.00 -> 0.11; AAAGGGGGC 1.06 -> 0.05), the same order as
+uncalled4. Unrefined, base boundaries are the basecaller's moves at a stride of 6
+samples against ~12 samples per base. The workflow ran to completion either way, which
+is the problem: `CONFIG.sh` now exits if `^mod-calls remora` has no `^remora-levels`,
+and `RemoraLevels` exits if `--levels` is missing, so a remora target requested by
+name cannot bypass it either. A table path that does not exist yet is still only a
+warning, like every other not-yet-staged input.
+
+**Results of the first full run** (both backends, matched and pooled, p0.02 and fpr0.02)
+are summarised in the js4031 project `CLAUDE.md`: held-out controls at 3.5-4.6% under
+p < 0.02 and ~2% under fpr 0.02 (cutoff |z| > 2.9-3.1 in both backends); treated PolyT
+strand 5-6% against ~2%; the two backends agree. **Several defaults are due a second
+look before these numbers are used** (Jacob, 2026-10-08) - nothing has been decided:
+`mod_pval`/`mod_fpr` and the global cutoff, `mod_min_kmer_obs` (30),
+`mod_max_obs_per_kmer` (20000), `mod_mad` (15), the +/-(k-1) clean flank, the Remora
+k-mer context (4,4) and trim, and Fisher smoothing (off).
+
+### Tunable alignment filter and the modification-calling parameter sweep (js4031, 2026-10-08)
+
+**Why.** On js4031 the MAPQ >= 20 filter removes most of what permanganate does to the
+PolyT strand: in treated G4 libraries only 10-14% of mapped PolyT reads pass it, against
+~60% in controls (rep 2: 12,319 mapped -> 1,734 passing). The reads it removes are the
+modified ones. Model oligos are also the only data small enough to tune the mod-calling
+defaults on; the genome datasets are far too large to sweep.
+
+**`filter_mapq` (main workflow).** `Filter_alignments.sh -q N`, set by
+`--config filter_mapq=N` (default 20, behaviour unchanged). The command is now
+`samtools view -q N -F 0x904`: unmapped, secondary and supplementary are always
+removed. Unmapped is excluded by flag because unmapped reads carry MAPQ 0, so `-q 0`
+alone would pass them to uncalled4. Supplementary stays out for the reasons in the
+concatemer note. Changing the key reruns everything from the filter down, in place.
+
+**The sweep (`workflow/sweeps/mod_sweep.smk`)** compares settings side by side without
+touching the main outputs. It `include`s the generated `Snakefile` (for the samples,
+relationships, pod5 paths, pools and the phase 0/2c helpers) and defines `sweep_all`
+before the include so that it, not `rule all`, is the default target.
+
+```bash
+snakemake -s workflow/sweeps/mod_sweep.smk --cores 30 --keep-going \
+    --config sweep_table=workflow/sweeps/mod_sweep_example.tsv
+```
+
+One row of the table = one parameter set: `set backend mapq mad max_obs flank scale
+min_kmer_obs fisher_lag threshold`. Everything goes under `sweep/`, keyed by parameters,
+so sets sharing a filter or a model share files:
+
+```
+sweep/filtered_alignments/mapq{q}/{genome}/{raw_sample}.bam       re-filtered data/aligned_reads
+sweep/uncalled4/mapq{q}/{genome}/{raw_sample}.bam                 signal re-aligned
+sweep/kmer_model/{backend}/mapq{q}/mad{m}_cap{c}_flank{f}/{genome}/{model}.tsv
+sweep/perbase_mod/{backend}/mapq{q}/{model tag}/{thr}_min{n}_fl{l}_{scale}/{genome}/…
+sweep/tables/{name}/positions.tsv.gz, summary.tsv, manifest.tsv   mod_sweep_table.py
+```
+
+- **A set at the main workflow's MAPQ reuses `data/uncalled4/`** instead of re-aligning,
+  which also makes it the exact baseline. Pass `filter_mapq=` to the sweep if the main
+  run did not use 20.
+- A `^u` sample has no pre-filter reads and can only be in sets at that MAPQ; the sweep
+  raises a named error otherwise.
+- `sweep_relationships=`, `sweep_genomes=`, `sweep_pools=true`, `sweep_name=` narrow or
+  extend it. The example table is 24 mod-calling settings, each run identically at
+  three filters (MAPQ 20, 10, 0) and with both backends = 144 sets, named
+  `<backend>_q<mapq>_<setting>` so a setting lines up across filters. One factor at a
+  time around the defaults, mostly at fpr 0.02 so sets are compared at equal background.
+  On js4031 (15 samples, 3 references) that is roughly 18,000 jobs.
+- `summary.tsv` reports per set x relationship x contig: coverage, `background` (the
+  control's realised modified fraction), mean and max reactivity, reactivity at T vs
+  non-T, and `n_reactive`. It ranks nothing.
+
+**Options, and where each is set** (sweep column; main-workflow `--config` key):
+
+| What | Sweep | Main | Default | Script flag |
+|---|---|---|---|---|
+| Minimum MAPQ | `mapq` | `filter_mapq` | 20 | `Filter_alignments.sh -q` |
+| Signal backend | `backend` | `^mod-calls` | — | `--backend` |
+| Model outlier filter (x MAD) | `mad` | `mod_mad` | 15 | `--mad` |
+| Observations kept per k-mer | `max_obs` | `mod_max_obs_per_kmer` | 20000 | `--max-obs-per-kmer` |
+| Model error-mask flank | `flank` | — | k-1 | `--clean-flank` (new; -1 = off) |
+| Centre/spread of the test | `scale` | — | mean, SD | `--scale sd\|mad` (new) |
+| Minimum k-mer observations to score | `min_kmer_obs` | `mod_min_kmer_obs` | 30 | `--min-kmer-obs` |
+| Fisher window along the read | `fisher_lag` | `mod_fisher_lag` | 0 | `--fisher-lag` |
+| Threshold | `threshold` | `mod_pval` / `mod_fpr` | p 0.02 | `--pval` / `--fpr` |
+| Control model | `sweep_pools` | `^mod-pool` | matched | — |
+
+Not wired into the sweep, each needing a decision or new code first: the Remora k-mer
+context (`--kmer-context`, default 4,4) and its per-base trim and refinement iterations;
+a per-k-mer or per-position cutoff in place of the global fpr cutoff; the half-A/half-B
+split fraction; using dwell (`dtw.length`) as a second signal; keeping supplementary
+alignments.
+
+**Caveat for unfiltered sets on js4031 - corrected.** An earlier version of this note
+said VEGF-WT and VEGF-NMR are near-identical and would be mixed at `mapq 0`. That was
+asserted without looking at the sequences and is wrong: on `G4_strand` and
+`Reverse_complement` the three constructs share only the two constant spacers (longest
+common run 15-18 nt) and have different 20-nt flanks, as Jacob pointed out. What IS
+shared is on `PolyT_reverse_complement`: all three constructs have an identical 46-nt
+core (spacer - polyT - spacer), flanked by 20 unique bases on each side. A full-length
+PolyT read is assignable from its flanks; one with a truncated or badly called flank is
+not, and that is true of cMYC as well as the two VEGFs. So at `mapq 0` some PolyT reads
+may be assigned among the three constructs arbitrarily. How many has not been measured.
+
+**Tested / not tested.** Filter on a hand-made BAM: default identical to the old command;
+`-q 0` keeps MAPQ 0 primaries and still drops unmapped, secondary and supplementary.
+`--scale mad` and `--clean-flank` are covered in `test_mod_calling.py`. The sweep
+dry-runs under snakemake 9.27 on a synthetic two-relationship workspace (362 jobs for
+the example table) with the right commands; `mod_sweep_table.py` was run on hand-made
+call files. **The sweep has not been executed on real data.**
+
+**Use `--rerun-triggers mtime` after the `filter_mapq` change (js4031, 2026-10-08).**
+Adding `params: mapq` and `-q {params.mapq}` to `filter_alignments` changed that rule's
+code and params, so Snakemake's provenance triggers want to rebuild every existing
+`data/filtered_alignments/` BAM and the `data/uncalled4/` BAMs behind them — the first
+sweep dry run on hermes scheduled 45 `filter_alignments` + 45 `uncalled4_align` jobs it
+had no reason to run. The rebuilt files would be identical (the default filter selects
+the same reads), but it costs 45 signal alignments and re-stamps the main outputs, which
+then makes everything downstream of them look stale. With `--rerun-triggers mtime` the
+same dry run schedules only `sweep_*` rules (17,786 jobs for the 144-set example table).
+Pass it to the sweep and to the next main-workflow run on any project whose filtered BAMs
+predate this change. Both `mod_sweep.smk` usage lines should be read as including it.
+
+### Phase 2d: per-read, per-nucleotide tables, behind `^per-read` (js4031, 2026-10-08)
+
+The single-molecule, single-nucleotide view is central to this project but one row per
+aligned base per read is impractical at genome scale (js4022 would be ~9.5e9 rows per
+sample strand), so these tables are **off by default** and built only when CONFIG asks:
+
+```
+^per-read	uncalled4     data/perread_signal/uncalled4/{genome}/{raw_sample}_{strand}.tsv.gz
+^per-read	remora        data/perread_signal/remora/{genome}/{raw_sample}_{strand}.tsv.gz
+^per-read	mod-calls     data/perread_mod/{backend}/{genome}/{thr}/{raw_sample}_vs_{model}_{strand}.tsv.gz
+```
+
+- **Signal tables** (`perread_signal.py`, rule `perread_signal`): `read_id chr pos strand
+  nt kmer level level_sd dwell`, plus `model_diff` for uncalled4. Rows are in reference
+  order within a read on either strand.
+- **Call tables** (`perbase_mod_calls.py --per-read`, rule `perread_mod_calls`):
+  `read_id chr pos strand level z p called`. `called` is new and is the call at that
+  run's threshold, which is why `{thr}` is in the path. One table per `^mod-calls`
+  backend x threshold x control model, for treated and control.
+- All three share `read_id`, `chr`, `pos`, `strand`, so a molecule can be followed from
+  either backend's signal to its calls.
+
+**The uncalled4 table does not come from `uncalled4 convert`.** That TSV's index columns
+are `seq.name, seq.pos, seq.strand, aln.id`, and `aln.id` is a running number per file,
+not the read name, so it cannot be joined to the Remora or call tables - which defeats
+the point. (`aln.read_id` exists as a layer in the uncalled4 source, but whether
+`--tsv-cols` accepts it is untested, and `dtw.base` looked just as valid and was not.)
+The table is written from the BAM's DTW tags by the same decoder the mod calling uses,
+with `sam.query_name`. `uncalled4_convert_tsv` is unchanged and can still be requested
+by name.
+
+**Design notes.**
+- `perread_mod_calls` is a separate rule that re-scores the sample, not an extra output
+  of `perbase_mod_calls`: a rule's outputs cannot depend on a CONFIG flag without
+  defining the rule twice, and a per-read file written as an untracked side effect (the
+  old `mod_per_read` config key, now removed) is not rebuilt when the flag is turned on
+  after the per-position files exist. The cost is scoring twice, only when asked.
+- `CONFIG.sh` rejects `^per-read mod-calls` without a `^mod-calls` line, and
+  `^per-read remora` without `^remora-levels`.
+- The extra uncalled4 columns (`dtw.current_sd`, `dtw.length`, `dtw.model_diff`) are read
+  defensively: if an attribute is missing or the wrong length the column is `NA` and the
+  log counts `reads without <attr>`, rather than the table failing. `dtw.current`,
+  `seq.kmer` and `seq.pos` are proven on real data; the three extras are not.
+- Removing the `per_read` param changed `perbase_mod_calls`' code, so the main workflow
+  will want to rebuild existing calls unless run with `--rerun-triggers mtime`.
+
+**Tested / not tested.** `test_mod_calling.py` writes signal tables for both strands
+through the stand-in source and checks row count, reference order, strand, reference
+base, k-mer, NA handling and that every signal row has a matching call row; and that
+`--per-read` alone gives the same table as with `-o`. Six CONFIG variants dry-run as
+intended (off by default; all three on = 8 `perread_signal` + 8 `perread_mod_calls` for
+one relationship; the three rejected cases exit with their messages). **Not run on real
+data.** First run, check `reads without current_sd / length / model_diff` is absent
+from the uncalled4 log.
+
+### New workflow defaults from the js4031 sweep; `^filter-mapq` (2026-10-09)
+
+Jacob chose `uncalled4_q0_fisher1_fpr02` and `remora_q0_fisher1_fpr02` from the 144-set
+sweep, and those settings are now what the workflow does with no overrides:
+
+| Setting | Was | Now | Where |
+|---|---|---|---|
+| Alignment filter | MAPQ >= 20 | MAPQ >= 0 | `^filter-mapq` in CONFIG (`FILTER_MAPQ`), or `--config filter_mapq=` |
+| Calling threshold | p < 0.02 | fpr 0.02 | `--config mod_fpr=` (`mod_pval=` adds a p threshold) |
+| Fisher window | 0 | 1 | `--config mod_fisher_lag=` |
+
+Unchanged: mean/SD scale, 15-MAD outlier filter, k-1 error-mask flank, 20,000
+observations per k-mer, 30 minimum. **The scripts' own defaults are unchanged**
+(`perbase_mod_calls.py` alone still means p < 0.02, no smoothing) - an fpr threshold
+needs a null histogram a bare script call does not have. The workflow passes its
+settings explicitly.
+
+**MAPQ 0 is a model-oligo result.** Secondary alignments were 0.04% of mapped reads
+there. On a genome MAPQ 0 is multimapping, so whole-genome projects should set
+`^filter-mapq 10` or `20`; that is why it is a CONFIG line and not only a `--config` key.
+`bin/nanoprint preprocess` still filters at MAPQ 20 and was not touched.
+
+Fisher smoothing was scored on a 22-base homopolymer, the ideal case for averaging
+neighbours; a window of 1 costs about one base of resolution either side.
+
+Changing these defaults changes rule params, so an existing project re-run without
+`--rerun-triggers mtime` rebuilds from the filter down. For js4031 that is intended:
+`js4031_manuscript_CONFIG` regenerates everything.

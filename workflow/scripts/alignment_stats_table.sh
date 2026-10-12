@@ -1,8 +1,11 @@
 #!/bin/bash
 
 # Alignment Stats Table: Combine per-sample alignment statistics into a single CSV table
-# Pivots long-format per-file stats into wide-format with two rows per sample:
-# one row for raw (not filtered) alignments, one row for filtered alignments.
+# Pivots long-format per-file stats into wide-format with two rows per sample and
+# reference genome: one row for raw (not filtered) alignments, one for filtered.
+# The genome is the name of the directory each input file sits in
+# (tables/alignment_stats/{genome}/{sample}.txt) - the files themselves do not
+# record it, and without it the rows of a multi-genome run cannot be told apart.
 
 set -euo pipefail
 
@@ -24,7 +27,7 @@ Input format (tab-delimited):
     Sample  Statistic  Raw_alignment  Filtered_alignment
 
 Output format (CSV):
-    Sample, Filter_status, Total_sequences, Total_length, Bases_mapped,
+    Sample, Genome, Filter_status, Total_sequences, Total_length, Bases_mapped,
     Bases_mapped_cigar, Mismatches, Error_rate, Average_length, Average_quality,
     Primary_alignments, Secondary_alignments, Supplementary_alignments
 
@@ -59,7 +62,7 @@ mkdir -p "$(dirname "$OUTPUT")"
 echo "Combining ${#INPUTS[@]} alignment stats files..."
 
 # Write CSV header
-echo "Sample,Filter_status,Total_sequences,Total_length,Bases_mapped,Bases_mapped_cigar,Mismatches,Error_rate,Average_length,Average_quality,Primary_alignments,Secondary_alignments,Supplementary_alignments" > "$OUTPUT"
+echo "Sample,Genome,Filter_status,Total_sequences,Total_length,Bases_mapped,Bases_mapped_cigar,Mismatches,Error_rate,Average_length,Average_quality,Primary_alignments,Secondary_alignments,Supplementary_alignments" > "$OUTPUT"
 
 # Process each input file
 for f in "${INPUTS[@]}"; do
@@ -70,10 +73,13 @@ for f in "${INPUTS[@]}"; do
 
     echo "  Processing: $f"
 
+    # Reference genome = parent directory of the stats file.
+    genome=$(basename "$(dirname "$f")")
+
     # Pivot long-format stats into two wide-format rows (raw and filtered).
     # Input columns (tab-delimited): Sample, Statistic, Raw_alignment, Filtered_alignment
     # Output: two CSV rows per file — "Not_filtered" using col 3, "Filtered" using col 4.
-    tail -n +2 "$f" | awk '
+    tail -n +2 "$f" | awk -v genome="$genome" '
     BEGIN {
         FS = "\t"
         OFS = ","
@@ -99,14 +105,14 @@ for f in "${INPUTS[@]}"; do
     }
     END {
         # Row 1: not filtered (raw alignment values)
-        printf "%s,%s", sample, "Not_filtered"
+        printf "%s,%s,%s", sample, genome, "Not_filtered"
         for (i = 1; i <= n; i++) {
             printf ",%s", raw[want[i]]
         }
         printf "\n"
 
         # Row 2: filtered alignment values
-        printf "%s,%s", sample, "Filtered"
+        printf "%s,%s,%s", sample, genome, "Filtered"
         for (i = 1; i <= n; i++) {
             printf ",%s", filtered[want[i]]
         }
