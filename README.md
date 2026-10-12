@@ -44,6 +44,7 @@ nanoprint preprocess \
 | `-o` | yes | Output Uncalled4 BAM file |
 | `-p` | yes | Number of threads / parallel processes |
 | `-m` | no | Dorado basecalling model (default: `dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2` — pinned model with CpG 5mC/5hmC calling. Use `sup,5mCG_5hmCG` for chemistry auto-selection, or `sup`/`hac`/`fast` for no modification calling) |
+| `-q` | no | Minimum mapping quality kept by the alignment filter (default: `0`, every mapped primary alignment). Use `-q 10` or `-q 20` for whole-genome data |
 | `-T` | no | Directory for intermediate files (default: next to output; deleted on exit) |
 
 ## Model selection
@@ -149,7 +150,7 @@ looks fine and has no methylation data in it.
 |------|------|--------|
 | 1 | Dorado | pod5 → basecalled BAM (with move tables via `--emit-moves`) |
 | 2 | minimap2 | basecalled BAM → aligned BAM (`MM`/`ML` modification calls + move tags preserved via `-T`/`-y`) |
-| 3 | samtools | aligned BAM → filtered BAM (MAPQ ≥ 20, no secondary/supplementary) |
+| 3 | samtools | aligned BAM → filtered BAM (mapped primary alignments with MAPQ ≥ `-q`, default 0; no secondary/supplementary) |
 | 4 | Uncalled4 | filtered BAM split by pod5 source → per-pod5 Uncalled4 BAMs (each sorted as it is written) → merged → **Uncalled4 BAM** |
 
 **Why step 4 splits by pod5:** If uncalled4 runs against all pod5 files at once on a coordinate-sorted BAM, it must seek randomly across every pod5 file to retrieve each read's raw signal — resulting in severe I/O bottlenecking (observed: 4.6% CPU utilization over 9 days on a 36-thread job). Instead, `nanoprint preprocess`:
@@ -181,7 +182,7 @@ Transfer both output files to ROAR (the `.bai` too — it is needed and not rebu
 
 **Use `^r`, not `^u`, for an ordinary aligned BAM.** A `^r` BAM is re-mapped through `samtools fastq | minimap2`, which keeps only the tags on the `Map_reads.sh` allowlist and would drop Uncalled4's DTW tags — the whole reason the signal alignment was run. That re-mapping is what `^u` avoids.
 
-What a `^u` sample does *not* produce, because the reads it would need no longer exist: the `aligned_reads` (pre-filter) copies of the alignment statistics, histograms and IGV exports. The supplied BAM counts as the filtered alignment — it is one, being MAPQ-filtered with no secondary or supplementary records — so the `filtered_alignments` versions of all three are produced as usual, and `tables/alignment_stats_table.csv` carries `NA` in the `Not_filtered` row for these samples.
+What a `^u` sample does *not* produce, because the reads it would need no longer exist: the `aligned_reads` (pre-filter) copies of the alignment statistics, histograms and IGV exports. The supplied BAM counts as the filtered alignment — it is one, holding only mapped primary alignments, filtered at whatever MAPQ `nanoprint preprocess -q` was given — so the `filtered_alignments` versions of all three are produced as usual, and `tables/alignment_stats_table.csv` carries `NA` in the `Not_filtered` row for these samples.
 
 Mixing is fine: a CONFIG can hold `^r` and `^u` relationships side by side, and each sample follows its own route through the workflow.
 
@@ -417,6 +418,85 @@ UCSC bigWig binary format.
 
 ### Location
 `data/signal_bw_merged/{genome}/significance_threshold_{sig}/{sample}_{strand}.bw`
+
+---
+
+## Modification Call Files (optional, `^mod-calls`)
+
+### Description
+A third readout next to per-base error and signal deviation: every read is tested base by base against a k-mer signal model built from the relationship's control, and the value reported is the **fraction of reads called modified** at each position. Built only when CONFIG has a `^mod-calls` line. See [Direct Modification Calling](#direct-modification-calling) for the method and settings.
+
+### Format
+Tab-delimited, gzip-compressed, no header.
+
+**K-mer model** (`.tsv`, not compressed): `#key=value` metadata lines (backend, k, k-mer context, level table, filter settings), a header line, then one row per k-mer: `kmer`, `n`, `n_outlier`, `mean`, `sd`, `median`, `mad`. A model is refused by the scoring step unless its metadata matches the run.
+
+**Per-position calls:**
+
+| Column | Name | Description |
+|--------|------|-------------|
+| 1 | chr | Chromosome / contig |
+| 2 | pos | 1-based position |
+| 3 | nt | Reference nucleotide |
+| 4 | cov | Reads scored at the position |
+| 5 | frac | Fraction of those reads called modified |
+| 6 | n_mod | Reads called modified |
+| 7 | mean_z | Mean signed z-score |
+| 8 | mean_absz | Mean absolute z-score |
+
+**Modification reactivity:**
+
+| Column | Name | Description |
+|--------|------|-------------|
+| 1 | chr | Chromosome / contig |
+| 2 | pos | 1-based position |
+| 3 | nt | Reference nucleotide |
+| 4 | reactivity | Treatment − control modified fraction |
+| 5 | cov_t | Treatment reads scored |
+| 6 | cov_c | Control reads scored |
+| 7 | frac_t | Treatment modified fraction |
+| 8 | frac_c | Control modified fraction (the background) |
+
+### Location
+```
+data/kmer_model/{backend}/{genome}/{model}.tsv
+data/perbase_mod/{backend}/{genome}/{thr}/{raw_sample}_vs_{model}_{strand}.txt.gz
+data/mod_reactivity/{backend}/{genome}/{thr}/{model_set}/{sample}_{strand}.txt.gz
+```
+`{backend}` is `uncalled4` or `remora`; `{thr}` is the calling threshold (`fpr0.02`, `p0.02`, …); `{model}` is a control's raw_sample name or a `^mod-pool` name; `{model_set}` is `matched` or the pool name. Files are whole-genome (not split by chromosome).
+
+---
+
+## Per-Read, Per-Nucleotide Tables (optional, `^per-read`)
+
+### Description
+The single-molecule view: one row per aligned base per read, nothing averaged. Every table carries the read name, so one molecule can be followed from either backend's signal to its modification calls. **Off unless CONFIG asks** with a `^per-read` line — at ~90 bytes per row before compression these are practical for model oligos, plasmids and single loci, not for a genome.
+
+### Format
+Tab-delimited, gzip-compressed, with a header.
+
+**Signal tables** (`^per-read uncalled4`, `^per-read remora`):
+
+| Column | Description |
+|--------|-------------|
+| read_id | Read name |
+| chr, pos, strand | Contig, 1-based position, `+` or `-` |
+| nt | Reference base at `pos` (forward strand) |
+| kmer | The k-mer the level is modelled by, in read orientation; `NA` if it holds a non-ACGT base |
+| level | uncalled4: `dtw.current`; remora: trimmed-mean normalized signal of the base |
+| level_sd | SD of the signal samples at the position |
+| dwell | Number of signal samples at the position |
+| model_diff | uncalled4 only: level minus the pore model's level for the k-mer |
+
+The two backends' levels are in different units and registered to different bases of the k-mer: compare patterns between them, not values.
+
+**Call tables** (`^per-read mod-calls`): `read_id`, `chr`, `pos`, `strand`, `level`, `z`, `p`, `called`. `p` is the Fisher-combined value when smoothing is on; `called` is 1 where the read is called modified at that run's threshold. The per-position file above is the average of this table.
+
+### Location
+```
+data/perread_signal/{backend}/{genome}/{raw_sample}_{strand}.tsv.gz
+data/perread_mod/{backend}/{genome}/{thr}/{raw_sample}_vs_{model}_{strand}.tsv.gz
+```
 
 ---
 
@@ -813,6 +893,25 @@ uncalled4 --version
 python -c "import pod5; print(pod5.__version__)"
 ```
 
+### 3. Remora (optional — `^mod-calls remora` only)
+
+The `uncalled4` backend of direct modification calling needs nothing beyond the above. The `remora` backend reads raw signal through the Remora API:
+
+```bash
+pip install ont-remora==3.3.0            # the version the backend was written against
+pip install "setuptools>=77.0.3,<81"     # LAST, after uncalled4 is installed
+```
+
+- `ont-remora` requires `numpy<2`, which `environment.yml` pins. An existing environment on numpy 2 must be rebuilt or downgraded first.
+- It pulls in torch, which upgrades setuptools past the point where `pkg_resources` exists (`ModuleNotFoundError: No module named 'pkg_resources'`). uncalled4 needs `setuptools==69.5.1` to **build** and torch needs `>=77.0.3` to run, hence the range above, applied after uncalled4 is installed.
+- Remora's signal-mapping refinement needs ONT's k-mer level table, which is not shipped with Remora:
+
+```bash
+git clone https://github.com/nanoporetech/kmer_models.git
+# then in CONFIG:
+# ^remora-levels  /path/to/kmer_models/dna_r10.4.1_e8.2_400bps/9mer_levels_v1.txt
+```
+
 # Instructions
 
 ## 1. Organize data
@@ -877,6 +976,25 @@ Your CONFIG file should look something like this:
 #   pinned model + CpG 5mC/5hmC calling (emits MM/ML modification tags)
 # 'sup,5mCG_5hmCG' auto-selects chemistry and keeps mod calling; 'sup' disables it
 ^dorado-model dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2
+
+# Alignment filter: minimum mapping quality (default 0 = every mapped primary alignment).
+# Unmapped, secondary and supplementary records are always removed.
+# For WHOLE-GENOME data set 10 or 20.
+#^filter-mapq	20
+
+# Direct modification calling (optional; one line per backend, both may be given)
+#^mod-calls	uncalled4
+#^mod-calls	remora
+# remora only: pod5 for a ^u sample, and the k-mer level table (REQUIRED with remora)
+#^pod5	Mn04_uncalled4	/sequencer/output/run_Mn04/pod5_pass
+#^remora-levels	/path/to/kmer_models/dna_r10.4.1_e8.2_400bps/9mer_levels_v1.txt
+# A control model pooled over several controls, built next to each matched model
+#^mod-pool	CTRL_pool	CTRL_rep1_uncalled4	CTRL_rep2_uncalled4
+
+# Per-read, per-nucleotide tables (optional; large - model oligos and plasmids only)
+#^per-read	uncalled4
+#^per-read	remora
+#^per-read	mod-calls
 ```
 The wildcard variables are assigned designated as:
 
@@ -891,6 +1009,12 @@ The wildcard variables are assigned designated as:
 ^igv-bam Generate strand-split BAMs and indices for IGV visualization (flag, no value)
 ^igv-bigwig Generate coverage bigWig files for each strand-split BAM (flag, no value)
 ^dorado-model Dorado basecalling model for pod5 input (default: `dna_r10.4.1_e8.2_400bps_sup@v5.2.0_5mCG_5hmCG@v2`, a pinned model with CpG 5mC/5hmC calling); applies to all pod5 samples
+^filter-mapq Minimum mapping quality of the alignment filter (default: `0`, every mapped primary alignment; unmapped, secondary and supplementary records are always removed). Applies to all samples. **Set `10` or `20` for whole-genome data** — see "3. filter_alignments".
+^mod-calls Turn on direct modification calling with a signal backend: `uncalled4` or `remora`. One line per backend. See "Direct Modification Calling".
+^pod5 Raw signal for a `^u` sample, needed by the remora backend: raw_sample name, then a pod5 file or directory. `^r` pod5 samples need no such line.
+^remora-levels ONT k-mer level table for Remora's signal-mapping refinement. **Required with `^mod-calls remora`** — CONFIG.sh stops without it.
+^mod-pool A pooled control model: a name, then two or more control raw_sample names. Built in addition to each relationship's own (matched) control model.
+^per-read Build a per-read, per-nucleotide table: `uncalled4`, `remora` (signal) or `mod-calls` (z, p and the call). One line per table. Off by default.
 
 If you want to try out alternative variables, just add another row.
 
@@ -1236,7 +1360,11 @@ Example:
 
 ## 3. filter_alignments
 
-**Description:** Filter alignments by mapping quality and remove secondary/supplementary.
+**Description:** Keep mapped primary alignments at or above a mapping quality; unmapped, secondary and supplementary records are always removed.
+
+The minimum MAPQ is `0` by default, i.e. every mapped primary alignment is kept. Set it with `^filter-mapq <N>` in CONFIG (or `--config filter_mapq=<N>` for one run); it applies to every sample, and changing it reruns everything downstream of the filter.
+
+> **Whole-genome data: set `^filter-mapq 10` or `20`.** The default comes from model oligos, where a MAPQ ≥ 20 filter removed most permanganate-modified reads of one strand (modified bases cause basecall errors, which lower the alignment score) and secondary alignments were 0.04% of mapped reads. On a genome a MAPQ of 0 means the read fits two or more places equally well, and those reads should not be kept.
 
 **Script:** `workflow/scripts/Filter_alignments.sh`
 
@@ -1252,14 +1380,17 @@ Example:
 **Documentation:**
 
 ```
-Usage: Filter_alignments.sh -i <input_bam> -o <output_bam>
+Usage: Filter_alignments.sh -i <input_bam> -o <output_bam> [-q <min_mapq>]
 
-Filter BAM alignments by mapping quality (MAPQ >= 20) and remove
-secondary (-F 0x100) and supplementary (-F 0x800) alignments.
+Keep mapped primary alignments with MAPQ >= -q. Unmapped (0x4), secondary (0x100)
+and supplementary (0x800) records are always removed (samtools view -q N -F 0x904).
 
 Required arguments:
     -i    Input BAM file
     -o    Output filtered BAM file
+
+Optional arguments:
+    -q    Minimum mapping quality (default: 0)
 
 Example:
     Filter_alignments.sh -i sample.bam -o sample_filtered.bam
@@ -2701,3 +2832,106 @@ From js4007 benchmarks on WGS data:
 - `--time=0:30:00` (30 minutes is sufficient for most WGS samples)
 
 The `uncalled4_align` Snakemake rule uses `threads: 8` which reserves 64 GB on Roar's standard partition (8 GB/core), which is adequate for most samples but may be marginal for the worst-case 75 GB peak.
+
+
+## Direct Modification Calling
+
+An optional third readout (phases 2c, 2d and 3c), next to per-base error and DTW signal deviation. Each read is tested base by base against a canonical k-mer signal model built from the **control** of its relationship; a base is "modified" in a read when its signal level is improbable under that model, and the track is the fraction of reads called modified. The method follows Rembo (P2-seq) and the test is Tombo's sample comparison; neither tool is a dependency.
+
+### Turning it on
+
+```
+^mod-calls	uncalled4
+^mod-calls	remora
+^remora-levels	/path/to/kmer_models/dna_r10.4.1_e8.2_400bps/9mer_levels_v1.txt
+```
+
+| Backend | Signal level | Needs |
+|---------|--------------|-------|
+| `uncalled4` | `dtw.current` from the Uncalled4 BAM | a pod5 (`^r`) or Uncalled4 (`^u`) sample; no extra software |
+| `remora` | trimmed-mean signal per base from the Remora API, refined against `^remora-levels`, modelled by a centred 9-mer | that, plus pod5 (`^r` path, or a `^pod5` line for a `^u` sample), `ont-remora` and the level table |
+
+Both backends score the same reads (the remora backend takes its alignments from the Uncalled4 BAM), and both may be requested together. A requested backend that cannot run for a relationship prints a `WARNING` naming it when the Snakefile is parsed.
+
+### How a call is made
+
+1. **Model.** The control's reads are split in two by a hash of the read name. Half A builds the model: per k-mer, the signal levels from k-mers aligned without mismatch or indel, with outliers beyond 15 MAD removed.
+2. **Score.** z = (level − k-mer mean) / k-mer SD, with a two-sided Gaussian p-value, for every read at every position. The control is scored on **half B** — reads the model never saw — and the treatment on all reads. Only the model side is filtered for mismatches: a modified base is what makes the basecaller err.
+3. **Smooth.** p-values are combined along each read by Fisher's method over a window of ±1 base.
+4. **Threshold.** A base is called where the statistic exceeds the cutoff that 2% of the held-out control exceeds (a false-positive rate of 0.02). One global cutoff per model.
+5. **Reactivity** = treatment − control modified fraction.
+
+The control's own modified fraction (`frac_c`) is the background, and it is never zero: it sits at the false-positive rate by construction. Always read reactivity, not the treated fraction alone. One modified base shifts the current of every k-mer containing it, so calls spread over the neighbouring positions, as they do in the signal-deviation track.
+
+### Matched and pooled control models
+
+`matched` (always built) is the relationship's own control. A `^mod-pool` line builds one more model from several controls, for every relationship whose control is a member:
+
+```
+^mod-pool	CTRL_pool	CTRL_rep1_uncalled4	CTRL_rep2_uncalled4
+```
+
+Outputs land in `.../matched/` and `.../CTRL_pool/`. The difference between the two is the sample-to-sample reproducibility of the control signal. Do not pool controls of different constructs or conformations.
+
+### Settings
+
+Defaults were chosen on model oligos (js4031) from the parameter sweep below. All are `--config` keys:
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `mod_fpr` | `0.02` | Call threshold as a false-positive rate on the held-out control |
+| `mod_pval` | off | Call threshold as a Gaussian p-value (e.g. `0.02`, the published threshold). On real data p < 0.02 flagged 3.5–4.6% of control observations, not 2% |
+| `mod_fisher_lag` | `1` | Fisher window along the read, in bases either side (`0` = off) |
+| `mod_mad` | `15` | Outlier filter of the model, in MADs |
+| `mod_min_kmer_obs` | `30` | K-mers the model saw fewer times than this are not scored |
+| `mod_max_obs_per_kmer` | `20000` | Observations kept per k-mer (a uniform random sample) |
+
+`mod_fpr` and `mod_pval` take comma-separated lists and may be given together; each threshold writes under its own `{thr}/` folder. The alignment filter (`^filter-mapq`, default 0) matters here too: a strict MAPQ filter removes modified reads preferentially.
+
+On a short reference (model oligos) almost every k-mer occurs once, so the k-mer model is in effect a per-position model. That is correct there but such a model is not transferable to another reference.
+
+### Parameter sweep
+
+`workflow/sweeps/mod_sweep.smk` re-runs modification calling over a table of parameter sets and tabulates them side by side. It is meant for small datasets, where defaults can be tuned cheaply before being applied to a genome. It sits on top of a finished main run, reads its `data/aligned_reads/` BAMs (so do not mark that directory `^t` before sweeping the filter), and writes only under `sweep/`.
+
+```bash
+./workflow/scripts/CONFIG.sh -i CONFIG -o Snakefile
+snakemake -s workflow/sweeps/mod_sweep.smk --cores 30 --keep-going \
+    --rerun-triggers mtime \
+    --config sweep_table=workflow/sweeps/mod_sweep_example.tsv
+```
+
+The sweep table is tab-separated, one parameter set per row:
+
+| Column | Meaning |
+|--------|---------|
+| `set` | Name of the parameter set (unique) |
+| `backend` | `uncalled4` or `remora` |
+| `mapq` | Minimum MAPQ of the alignment filter |
+| `mad` | MAD multiple of the model's outlier filter |
+| `max_obs` | Observations kept per k-mer (`0` = all) |
+| `flank` | Error-mask flank of the model: `default` (k−1), a number, or `off` |
+| `scale` | `sd` (k-mer mean and SD) or `mad` (median and 1.4826 × MAD) |
+| `min_kmer_obs` | Minimum model observations for a k-mer to be scored |
+| `fisher_lag` | Fisher window (`0` = off) |
+| `threshold` | `p<value>` or `fpr<value>`, e.g. `fpr0.02` |
+
+`workflow/sweeps/mod_sweep_example.tsv` holds 24 settings × three filters (MAPQ 20, 10, 0) × both backends = 144 sets. Optional `--config` keys: `sweep_name`, `sweep_relationships=a,b`, `sweep_genomes=g1,g2`, `sweep_pools=true`, and `filter_mapq=<N>` if the main run's filter was set by `--config` rather than `^filter-mapq`. Sets at the main run's MAPQ reuse its Uncalled4 BAMs; a `^u` sample has no pre-filter reads and can only be in those sets.
+
+Outputs, in `sweep/tables/<name>/`:
+
+| File | Content |
+|------|---------|
+| `manifest.tsv` | Which treated and control call files each row came from |
+| `positions.tsv.gz` | One row per set × relationship × position: coverage, modified fraction and mean z for treated and control, and reactivity |
+| `summary.tsv` | One row per set × relationship × contig: `background` (the control's realised modified fraction), mean and maximum reactivity, reactivity at T and non-T, `n_reactive` |
+
+The tables rank nothing; they lay the sets out to be compared.
+
+### Testing
+
+```bash
+python3 workflow/tests/test_mod_calling.py
+```
+
+runs the shared statistics and the scripts on simulated reads; it needs neither uncalled4 nor Remora.

@@ -4,7 +4,8 @@
 # mapping quality. Unmapped, secondary and supplementary records are always dropped.
 # Usage: ./Filter_alignments.sh -i <input_bam> -o <output_bam> [-q <min_mapq>]
 #
-# -q defaults to 20. -q 0 keeps every mapped primary alignment ("unfiltered").
+# -q defaults to 0: every mapped primary alignment is kept. On whole-genome data
+# use -q 10 or 20 - there MAPQ 0 means the read fits two or more places equally well.
 # Unmapped reads are excluded with a flag, not by MAPQ: they carry MAPQ 0, so at
 # -q 0 a MAPQ test alone would let them through, and uncalled4 cannot align them.
 # Secondary and supplementary records stay out at every setting - a supplementary
@@ -13,12 +14,12 @@
 
 # Function to display usage
 usage() {
-    echo "Usage: $0 -i <input_bam> -o <output_bam> [-q <min_mapq, default 20>]"
+    echo "Usage: $0 -i <input_bam> -o <output_bam> [-q <min_mapq, default 0>]"
     exit 1
 }
 
 # Parse command line arguments
-MIN_MAPQ=20
+MIN_MAPQ=0
 
 while getopts ":i:o:q:g:T:" opt; do
     case ${opt} in

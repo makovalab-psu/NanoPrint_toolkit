@@ -28,6 +28,12 @@ The pipeline is configured via a CONFIG file with prefix notation:
 | `^r` | Relationship: Sample, Treatment, Control | `^r SampleName Treatment.bam Control.bam` |
 | `^u` | Relationship whose inputs are already Uncalled4-aligned | `^u SampleName Treatment_uncalled4.bam Control_uncalled4.bam` |
 | `^t` | Temporary directory (auto-deleted) | `^t data/aligned_reads` |
+| `^filter-mapq` | Minimum MAPQ of the alignment filter (default 0; 10 or 20 for whole genomes) | `^filter-mapq 20` |
+| `^mod-calls` | Direct modification calling backend (`uncalled4`, `remora`; one line each) | `^mod-calls uncalled4` |
+| `^pod5` | Raw signal for a `^u` sample (remora backend) | `^pod5 Sample_uncalled4 /path/pod5` |
+| `^remora-levels` | ONT k-mer level table; required with `^mod-calls remora` | `^remora-levels /path/9mer_levels_v1.txt` |
+| `^mod-pool` | Pooled control model: name, then control raw_samples | `^mod-pool CTRL_pool ctrl1 ctrl2` |
+| `^per-read` | Per-read, per-nucleotide table (`uncalled4`, `remora`, `mod-calls`); off by default | `^per-read mod-calls` |
 
 Extensions are automatically stripped from all file values.
 
@@ -109,7 +115,8 @@ are skipped entirely for them (see the `^u` dev note at the end of this file).
 - Calculate read statistics (N50, Q50, total bases)
 - Map reads to reference genome with minimap2
 - When pod5 input: `find_raw_reads()` returns `data/basecalled/{sample}.bam` to trigger dorado
-- Filter alignments (MAPQ >= 20, remove secondary/supplementary)
+- Filter alignments (mapped primary alignments at MAPQ >= `^filter-mapq`, default 0; unmapped,
+  secondary and supplementary always removed)
 - Generate alignment statistics and histograms
 
 ### Phase 2: Per-base Error (Steps 6-8)
@@ -1963,8 +1970,10 @@ a model from the other backend is refused, an fpr of 0.02 on a Gaussian null lan
 a batch effect has the expected mean and widened SD. A snakemake 9.27 dry run with two
 `^u` relationships, `^pod5`, a `^mod-pool` and `mod_fpr=0.02` schedules, per backend,
 3 models, 8 null histograms, 32 call jobs and 16 reactivity jobs.
-**Neither backend has been run on real data** — written without uncalled4, pod5 or
-remora installed. First run, check in this order:
+At the time of this note neither backend had been run on real data (written without
+uncalled4, pod5 or remora installed). **Both have since run successfully on js4031**
+(hermes, 2026-10-08 onward) - see "first run on real data" below for what that run
+found and fixed. The checks for a first run on a new dataset, in order:
 
 1. uncalled4: `aln.dtw.current` and `aln.seq.kmer` decode with `layers=["dtw"]` and are
    the same length as `aln.seq.pos` (the script exits if not). No start-up warning about
@@ -1972,7 +1981,8 @@ remora installed. First run, check in this order:
 2. remora: reads are found in the pod5 (`reads missing from pod5: 0`), `reads failed`
    is a small minority, and positions line up — a strongly reactive T should sit within
    a few bases of the same T in the uncalled4 track.
-3. Both: held-out control modified fraction ≈ `mod_pval`; mean z ≈ 0.
+3. Both: held-out control modified fraction ≈ `mod_fpr` (under `mod_pval` it was
+   3.5-4.6% on js4031, not 2%); mean z ≈ 0.
 
 ### TO CHECK: concatemer reads may bias against modified units (js4031, Oct 2026)
 
@@ -2232,7 +2242,10 @@ may be assigned among the three constructs arbitrarily. How many has not been me
 `--scale mad` and `--clean-flank` are covered in `test_mod_calling.py`. The sweep
 dry-runs under snakemake 9.27 on a synthetic two-relationship workspace (362 jobs for
 the example table) with the right commands; `mod_sweep_table.py` was run on hand-made
-call files. **The sweep has not been executed on real data.**
+call files. **The sweep has since been run on real data:** the 144-set example table on
+js4031 (hermes, 17,786 jobs) completed, and the workflow defaults were chosen from its
+tables (see "New workflow defaults" below). The Default column in the table above is
+as of this note; MAPQ, Fisher window and threshold changed afterwards.
 
 **Use `--rerun-triggers mtime` after the `filter_mapq` change (js4031, 2026-10-08).**
 Adding `params: mapq` and `-q {params.mapq}` to `filter_alignments` changed that rule's
@@ -2297,8 +2310,9 @@ through the stand-in source and checks row count, reference order, strand, refer
 base, k-mer, NA handling and that every signal row has a matching call row; and that
 `--per-read` alone gives the same table as with `-o`. Six CONFIG variants dry-run as
 intended (off by default; all three on = 8 `perread_signal` + 8 `perread_mod_calls` for
-one relationship; the three rejected cases exit with their messages). **Not run on real
-data.** First run, check `reads without current_sd / length / model_diff` is absent
+one relationship; the three rejected cases exit with their messages). **Since run on real
+data:** all three tables were built for the js4031 manuscript run (38 GB in total), and
+reads sampled from the uncalled4 call table were found in all three. On a new dataset, check `reads without current_sd / length / model_diff` is absent
 from the uncalled4 log.
 
 ### New workflow defaults from the js4031 sweep; `^filter-mapq` (2026-10-09)
@@ -2321,7 +2335,13 @@ settings explicitly.
 **MAPQ 0 is a model-oligo result.** Secondary alignments were 0.04% of mapped reads
 there. On a genome MAPQ 0 is multimapping, so whole-genome projects should set
 `^filter-mapq 10` or `20`; that is why it is a CONFIG line and not only a `--config` key.
-`bin/nanoprint preprocess` still filters at MAPQ 20 and was not touched.
+**`bin/nanoprint preprocess` follows (2026-10-12, before the merge to main):** it gained
+`-q <min_mapq>`, default 0, passed to `Filter_alignments.sh`, whose own default is now 0
+as well. A `^u` BAM is filtered once, at preprocess time, and `^filter-mapq` cannot
+undo that - so the two defaults have to agree. Whole-genome preprocess runs should
+pass `-q 10` or `-q 20`. Older `^u` BAMs, and any reused `<stem>_filtered.bam`, are
+MAPQ >= 20. Syntax-checked and the argument validation run; the preprocess path itself
+has not been re-run with this change.
 
 Fisher smoothing was scored on a 22-base homopolymer, the ideal case for averaging
 neighbours; a window of 1 costs about one base of resolution either side.
