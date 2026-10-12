@@ -26,10 +26,16 @@
 #             sample-to-sample reproducibility of the canonical signal.
 #
 # How a base is called ({thr}), both selectable at once for comparison:
-#   p<P       --config mod_pval=P (default 0.02): Gaussian p-value below P.
-#   fpr<F     --config mod_fpr=F: the cutoff a fraction F of the model's held-out
-#             control reads exceed (rule perbase_mod_null measures it).
-# Either key takes a comma-separated list.
+#   fpr<F     --config mod_fpr=F (default 0.02): the cutoff a fraction F of the
+#             model's held-out control reads exceed (rule perbase_mod_null measures it).
+#   p<P       --config mod_pval=P (off by default): Gaussian p-value below P.
+# Either key takes a comma-separated list; mod_fpr= (empty) turns the default off.
+#
+# Defaults are the settings chosen from the js4031 parameter sweep
+# (sets uncalled4_q0_fisher1_fpr02 and remora_q0_fisher1_fpr02): a 2% false-positive
+# rate, Fisher's method over +/-1 position along the read, k-mer mean and SD,
+# 15-MAD outlier filter - on reads filtered at ^filter-mapq (default 0).
+# p < 0.02, the published threshold, realised a 3.5-4.6% false-positive rate there.
 
 import re
 import sys
@@ -51,8 +57,13 @@ def _threshold_list(key, default):
 
 
 # Threshold tags used in output paths: p0.02, fpr0.02, ...
-MOD_THRESHOLDS = ([f"p{v}" for v in _threshold_list("mod_pval", 0.02)]
-                  + [f"fpr{v}" for v in _threshold_list("mod_fpr", None)])
+MOD_THRESHOLDS = ([f"fpr{v}" for v in _threshold_list("mod_fpr", 0.02)]
+                  + [f"p{v}" for v in _threshold_list("mod_pval", None)])
+if not MOD_THRESHOLDS:
+    raise ValueError("No calling threshold: mod_fpr and mod_pval are both empty.")
+
+# Fisher's-method window along the read (0 = every position judged alone).
+MOD_FISHER_LAG = config.get("mod_fisher_lag", 1)
 
 
 def model_members(model):
@@ -220,7 +231,7 @@ rule perbase_mod_null:
     params:
         backend_args=mod_backend_args,
         min_obs=config.get("mod_min_kmer_obs", 30),
-        fisher_lag=config.get("mod_fisher_lag", 0)
+        fisher_lag=MOD_FISHER_LAG
     log:
         "logs/perbase_mod_null/{backend}/{genome}/{raw_sample}_vs_{model}_{strand}.log"
     benchmark:
@@ -262,14 +273,7 @@ rule perbase_mod_calls:
         threshold_args=mod_threshold_args,
         half=mod_half,
         min_obs=config.get("mod_min_kmer_obs", 30),
-        fisher_lag=config.get("mod_fisher_lag", 0),
-        # Per-read table (read_id, pos, z, p) for single-read heatmaps. Not a tracked
-        # output: it is optional and can be very large on anything but model oligos.
-        # z and p do not depend on the threshold, so there is no {thr} in its path.
-        per_read=lambda w: (
-            f"--per-read data/perbase_mod_reads/{w.backend}/{w.genome}/"
-            f"{w.raw_sample}_vs_{w.model}_{w.strand}.tsv.gz"
-            if config.get("mod_per_read", False) else "")
+        fisher_lag=MOD_FISHER_LAG
     log:
         "logs/perbase_mod/{backend}/{genome}/{thr}/{raw_sample}_vs_{model}_{strand}.log"
     benchmark:
@@ -293,7 +297,6 @@ rule perbase_mod_calls:
             {params.threshold_args} \
             --min-kmer-obs {params.min_obs} \
             --fisher-lag {params.fisher_lag} \
-            {params.per_read} \
             -o {output.calls} \
             2>&1 | tee {log}
         """

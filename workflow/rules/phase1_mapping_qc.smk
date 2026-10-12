@@ -95,18 +95,21 @@ rule map_reads:
 rule filter_alignments:
     """Filter alignments by mapping quality and remove unmapped/secondary/supplementary.
 
-    --config filter_mapq=N sets the minimum MAPQ (default 20; 0 keeps every mapped
-    primary alignment). It applies to every sample and everything downstream is
-    built from the result, so changing it reruns the workflow from here. To compare
-    settings side by side without touching these outputs, use
-    workflow/sweeps/mod_sweep.smk, which builds its own copies under sweep/.
+    The minimum MAPQ is ^filter-mapq in CONFIG (default 0: every mapped primary
+    alignment), or --config filter_mapq=N for one run. It applies to every sample
+    and everything downstream is built from the result, so changing it reruns the
+    workflow from here. To compare settings side by side without touching these
+    outputs, use workflow/sweeps/mod_sweep.smk, which builds its own copies under
+    sweep/. The default was 20 until js4031 showed that filter removing most
+    permanganate-modified reads; for whole-genome data, where MAPQ 0 means a read
+    that multimaps, set it back to 10 or 20.
     """
     input:
         bam="data/aligned_reads/{genome}/{raw_sample}.bam"
     output:
         bam="data/filtered_alignments/{genome}/{raw_sample}.bam"
     params:
-        mapq=config.get("filter_mapq", 20)
+        mapq=config.get("filter_mapq", FILTER_MAPQ)
     log:
         "logs/filter_alignments/{genome}/{raw_sample}.log"
     benchmark:

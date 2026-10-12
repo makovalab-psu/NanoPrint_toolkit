@@ -31,6 +31,7 @@ import mod_calling_common as mc
 import kmer_signal_model
 import perbase_mod_calls
 import mod_reactivity
+import perread_signal
 
 K = 9
 SHIFT = 6
@@ -102,7 +103,7 @@ class FakeSource:
 def run(module, argv, reads_for):
     """Run a script's main() with open_source replaced by simulated reads.
     reads_for(strand, bam) -> reads; bam is set when the script pools several."""
-    def fake_open(args, strand, need_clean, bam=None, pod5=None):
+    def fake_open(args, strand, need_clean, bam=None, pod5=None, want_extra=False):
         return FakeSource(reads_for(strand, bam), args.genome, args.half)
     old_open, old_argv = module.open_source, sys.argv
     module.open_source, sys.argv = fake_open, [module.__name__] + argv
@@ -306,6 +307,40 @@ def test_end_to_end():
     at41 = [r for r in reads if r[1] == "oligoA" and r[2] == "41"]
     assert len(at41) == int(trt[("oligoA", 41)][3])
     assert sum(float(r[6]) < 0.02 for r in at41) == int(trt[("oligoA", 41)][5])
+    assert sum(int(r[7]) for r in at41) == int(trt[("oligoA", 41)][5])     # 'called'
+
+    # The per-read table on its own (no -o), as the perread_mod_calls rule runs it.
+    only_reads = os.path.join(tmp, "only_reads.tsv.gz")
+    run(perbase_mod_calls,
+        common + ["-m", model, "-s", "for", "--per-read", only_reads],
+        lambda s, bam: treated[s])
+    assert read_table(only_reads) == read_table(os.path.join(tmp, "trt_for_reads.tsv.gz"))
+
+    # Per-read signal table: one row per read per position, in reference order
+    # within a read on either strand, joinable to the per-read calls by read name.
+    for strand in ("for", "rev"):
+        subset = [mc.ReadLevels(r.ref, r.start, r.read_id, r.pos, r.level, r.kmer, r.clean,
+                                {"level_sd": np.full(r.pos.size, 0.05),
+                                 "dwell": np.full(r.pos.size, 12.0),
+                                 "model_diff": np.where(np.arange(r.pos.size) == 0,
+                                                        np.nan, 0.1)})
+                  for r in treated[strand][:25]]
+        sig = os.path.join(tmp, f"signal_{strand}.tsv.gz")
+        run(perread_signal, common + ["-s", strand, "-o", sig], lambda s, bam: subset)
+        rows = read_table(sig)
+        assert rows[0] == ["read_id", "chr", "pos", "strand", "nt", "kmer", "level",
+                           "level_sd", "dwell", "model_diff"]
+        rows = rows[1:]
+        assert len(rows) == sum(r.pos.size for r in subset)
+        first = [r for r in rows if r[0] == subset[0].read_id]
+        assert [int(r[2]) for r in first] == sorted(int(x) + 1 for x in subset[0].pos)
+        assert {r[3] for r in rows} == {"-" if strand == "rev" else "+"}
+        assert all(r[4] == GENOME[r[1]][int(r[2]) - 1] for r in rows)
+        assert all(len(r[5]) == K and r[8] == "12" for r in rows)
+        assert sum(r[9] == "NA" for r in rows) == len(subset)
+    signal_ids = {(r[0], r[1], r[2]) for r in read_table(os.path.join(tmp, "signal_for.tsv.gz"))[1:]}
+    call_ids = {(r[0], r[1], r[2]) for r in reads}
+    assert signal_ids <= call_ids
 
     # A model from the other backend must be refused.
     try:
@@ -384,6 +419,28 @@ def test_end_to_end():
     cutoff, n_null = mc.cutoff_from_hists(
         [empty_hist], 0.02, {"statistic": "absz", "fisher_lag": 0})
     assert cutoff == float("inf") and n_null == 0
+    # A model that covers the sample's k-mers too thinly to score any of them is the
+    # same situation one step later: an empty result and a warning, not a failure.
+    thin_calls = os.path.join(tmp, "thin_calls.txt.gz")
+    run(perbase_mod_calls,
+        common + ["-m", model, "-s", "for", "--min-kmer-obs", "1000000", "-o", thin_calls],
+        lambda s, bam: treated[s][:50])
+    assert read_table(thin_calls) == []
+    # A model with none of the sample's k-mers is a mismatch, and stays an error.
+    other = os.path.join(tmp, "other_model.tsv")
+    b = mc.KmerModelBuilder(max_obs=0)
+    b.add(np.full(500, mc.kmer_to_code("AAAAAAAAA"), dtype=np.int64),
+          np.random.default_rng(2).normal(0, 1, 500))
+    mc.write_model(other, {"backend": "uncalled4", "kmer_len": 9, "kmer_context": "6,2",
+                           "levels": "none"}, b.finalize(15))
+    try:
+        run(perbase_mod_calls, common + ["-m", other, "-s", "for", "-o", thin_calls],
+            lambda s, bam: treated[s][:50])
+    except SystemExit as exc:
+        assert "none of their k-mers" in str(exc)
+    else:
+        raise AssertionError("a model sharing no k-mers with the sample must be an error")
+
     # ... but reads that yield no clean k-mer at all are still an error.
     dirty = [mc.ReadLevels(r.ref, r.start, r.read_id, r.pos, r.level, r.kmer,
                            np.zeros(r.pos.size, dtype=bool))

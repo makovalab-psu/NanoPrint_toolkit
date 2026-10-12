@@ -185,10 +185,12 @@ def clean_positions(err, start, pos, flank):
 
 class ReadLevels:
     """One read's observations. pos is 0-based reference coordinates; kmer is -1
-    where the context holds a non-ACGT base; clean is all False unless requested."""
-    __slots__ = ("ref", "start", "read_id", "pos", "level", "kmer", "clean")
+    where the context holds a non-ACGT base; clean is all False unless requested.
+    extra, when the source was opened with want_extra, maps a name to one more
+    per-position array (level SD, dwell, ...) for the per-read signal table."""
+    __slots__ = ("ref", "start", "read_id", "pos", "level", "kmer", "clean", "extra")
 
-    def __init__(self, ref, start, read_id, pos, level, kmer, clean):
+    def __init__(self, ref, start, read_id, pos, level, kmer, clean, extra=None):
         self.ref = ref
         self.start = start
         self.read_id = read_id
@@ -196,6 +198,7 @@ class ReadLevels:
         self.level = level
         self.kmer = kmer
         self.clean = clean
+        self.extra = extra
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +208,9 @@ class ReadLevels:
 class _Source:
     """Common filtering and bookkeeping for the two backends."""
 
-    def __init__(self, bam, genome, strand, half, need_clean, clean_flank=None):
+    def __init__(self, bam, genome, strand, half, need_clean, clean_flank=None,
+                 want_extra=False):
+        self.want_extra = want_extra
         self.bam = bam
         self.genome = genome
         self.want_reverse = None if strand is None else (strand == "rev")
@@ -257,8 +262,8 @@ class Uncalled4Levels(_Source):
     name = "uncalled4"
 
     def __init__(self, bam, genome, strand=None, half="all", need_clean=False,
-                 clean_flank=None, **_):
-        super().__init__(bam, genome, strand, half, need_clean, clean_flank)
+                 clean_flank=None, want_extra=False, **_):
+        super().__init__(bam, genome, strand, half, need_clean, clean_flank, want_extra)
         try:
             from uncalled4 import Config, Tracks
         except ImportError as exc:
@@ -318,10 +323,31 @@ class Uncalled4Levels(_Source):
                          f"guess how they line up.")
             keep = ~np.isnan(level)
             self.counts["positions without a level"] += int((~keep).sum())
+            extra = None
+            if self.want_extra:
+                # level_sd: SD of the samples DTW gave the position; dwell: how many
+                # samples; model_diff: level minus the pore model's level for the k-mer.
+                extra = {name: self._extra(aln.dtw, attr, level.size)[keep]
+                         for name, attr in (("level_sd", "current_sd"),
+                                            ("dwell", "length"),
+                                            ("model_diff", "model_diff"))}
             pos, level, kmer = pos[keep], level[keep], kmer[keep]
             self.counts["reads used"] += 1
             yield ReadLevels(sam.reference_name, sam.reference_start, sam.query_name,
-                             pos, level, kmer, self.clean_for(sam, pos))
+                             pos, level, kmer, self.clean_for(sam, pos), extra)
+
+    def _extra(self, dtw, attr, size):
+        """One more per-position DTW array, or NaN if this uncalled4 does not expose
+        it in the expected shape - a missing extra column must not cost the table."""
+        try:
+            values = self._np(getattr(dtw, attr), np.float64)
+        except Exception:
+            values = None
+        if values is None or values.size != size:
+            self.counts[f"reads without {attr}"] = \
+                self.counts.get(f"reads without {attr}", 0) + 1
+            return np.full(size, np.nan)
+        return values
 
     def close(self):
         self.tracks.close()
@@ -354,8 +380,9 @@ class RemoraLevels(_Source):
     BATCH = 2000
 
     def __init__(self, bam, genome, strand=None, half="all", need_clean=False,
-                 pod5=None, levels=None, context=None, clean_flank=None, **_):
-        super().__init__(bam, genome, strand, half, need_clean, clean_flank)
+                 pod5=None, levels=None, context=None, clean_flank=None,
+                 want_extra=False, **_):
+        super().__init__(bam, genome, strand, half, need_clean, clean_flank, want_extra)
         if not pod5:
             sys.exit("Error: the remora backend needs --pod5 (raw signal).")
         try:
@@ -398,12 +425,16 @@ class RemoraLevels(_Source):
             io_read.compute_ref_to_signal()
         if self.refiner is not None:
             io_read.set_refine_signal_mapping(self.refiner, ref_mapping=True)
-        level = np.asarray(
-            io_read.compute_per_base_metric("dwell_trimmean_trimsd")["trimmean"],
-            dtype=np.float64)
+        metrics = io_read.compute_per_base_metric("dwell_trimmean_trimsd")
+        level = np.asarray(metrics["trimmean"], dtype=np.float64)
         n = end - start
         if level.size != n:
             raise self.RemoraError("per-base metric length != reference span")
+        # level_sd: SD of the trimmed samples of the base; dwell: its sample count.
+        extra = None
+        if self.want_extra:
+            extra = {"level_sd": np.asarray(metrics["trimsd"], dtype=np.float64),
+                     "dwell": np.asarray(metrics["dwell"], dtype=np.float64)}
 
         # Metrics and k-mers are in read orientation; index i is the i-th base the
         # pore saw. Pad the reference span by the context, clipping at contig ends.
@@ -418,7 +449,7 @@ class RemoraLevels(_Source):
             pos = np.arange(end - 1, start - 1, -1, dtype=np.int64)
         else:
             pos = np.arange(start, end, dtype=np.int64)
-        return pos, level, kmer_codes(ext, self.kmer_len)
+        return pos, level, kmer_codes(ext, self.kmer_len), extra
 
     def _batch(self, sams):
         ids = {}
@@ -435,16 +466,18 @@ class RemoraLevels(_Source):
                 self.counts["reads missing from pod5"] += 1
                 continue
             try:
-                pos, level, kmer = self._levels(sam, p5)
+                pos, level, kmer, extra = self._levels(sam, p5)
             except self.RemoraError:
                 self.counts["reads failed"] += 1
                 continue
             keep = np.isfinite(level)
             self.counts["positions without a level"] += int((~keep).sum())
             pos, level, kmer = pos[keep], level[keep], kmer[keep]
+            if extra is not None:
+                extra = {name: values[keep] for name, values in extra.items()}
             self.counts["reads used"] += 1
             yield ReadLevels(sam.reference_name, sam.reference_start, sam.query_name,
-                             pos, level, kmer, self.clean_for(sam, pos))
+                             pos, level, kmer, self.clean_for(sam, pos), extra)
 
     def __iter__(self):
         import pysam
@@ -493,13 +526,14 @@ def add_backend_args(p, multi=False):
                         "(model on A, score the same sample on B)")
 
 
-def open_source(args, strand, need_clean, bam=None, pod5=None):
+def open_source(args, strand, need_clean, bam=None, pod5=None, want_extra=False):
     """bam/pod5 override args.bam/args.pod5, for scripts that take several."""
     cls = Uncalled4Levels if args.backend == "uncalled4" else RemoraLevels
     return cls(bam or args.bam, args.genome, strand=strand, half=args.half,
                need_clean=need_clean, pod5=pod5 or args.pod5, levels=args.levels,
                context=args.kmer_context,
-               clean_flank=getattr(args, "clean_flank", None))
+               clean_flank=getattr(args, "clean_flank", None),
+               want_extra=want_extra)
 
 
 # ---------------------------------------------------------------------------

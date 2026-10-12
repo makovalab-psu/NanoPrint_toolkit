@@ -36,7 +36,8 @@
 #   sweep_relationships=a,b       only these relationship samples (default: all)
 #   sweep_genomes=g1,g2           only these genomes (default: all)
 #   sweep_pools=true              also score against every ^mod-pool the control is in
-#   filter_mapq=<N>               the MAPQ the MAIN workflow was run with (default 20);
+#   filter_mapq=<N>               the MAPQ the MAIN workflow was run with, if it was
+#                                 given by --config and not by ^filter-mapq;
 #                                 sets of that MAPQ reuse its Uncalled4 BAMs
 #
 # Outputs:
@@ -163,7 +164,7 @@ if REMORA_LEVELS == "" and any(row["backend"] == "remora" for row in SWEEP_SETS)
 
 # MAPQ the main workflow filtered at. Sets at this MAPQ reuse its Uncalled4 BAMs
 # instead of re-aligning signal, which also makes them the exact baseline.
-MAIN_FILTER_MAPQ = int(config.get("filter_mapq", 20))
+MAIN_FILTER_MAPQ = int(config.get("filter_mapq", FILTER_MAPQ))
 
 
 def sweep_sample_bam(raw_sample, genome, mapq):

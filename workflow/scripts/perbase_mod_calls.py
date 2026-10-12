@@ -41,10 +41,12 @@ observations there, are not scored and do not count toward coverage.
 observation (|z|, or -log10 of the Fisher-combined p when --fisher-lag > 0), in
 bins of 0.01. With --hist-out, -o may be omitted.
 
---per-read additionally writes one row per read per scored position:
-    read_id  chr  pos  strand  level  z  p
-(p is the Fisher-combined value when --fisher-lag > 0). Large; meant for model
-oligos, plasmids and single loci.
+--per-read writes one row per read per scored position:
+    read_id  chr  pos  strand  level  z  p  called
+(p is the Fisher-combined value when --fisher-lag > 0; called is 1 where the read is
+called modified at this run's threshold). Large - one row per aligned base per read -
+so it is meant for model oligos, plasmids and single loci. With --per-read, -o may be
+omitted.
 
 Usage:
     perbase_mod_calls.py --backend uncalled4 -i <uncalled4.bam> -g <genome.fa> \
@@ -98,7 +100,7 @@ def parse_args():
                    help="Combine each p-value with its +/- N neighbours along the read "
                         "by Fisher's method before calling (default: 0 = off; Tombo's "
                         "default is 1)")
-    p.add_argument("--per-read", help="Also write the per-read table here (.tsv.gz)")
+    p.add_argument("--per-read", help="Write the per-read table here (.tsv.gz)")
     p.add_argument("-c", "--min-cov", type=int, default=1,
                    help="Minimum coverage to emit a position (default: 1)")
     args = p.parse_args()
@@ -108,8 +110,8 @@ def parse_args():
         p.error("--fpr needs --null-hist (histograms of the held-out control)")
     if args.null_hist and args.fpr is None:
         p.error("--null-hist is only used with --fpr")
-    if not args.output and not args.hist_out:
-        p.error("nothing to write: give -o and/or --hist-out")
+    if not args.output and not args.hist_out and not args.per_read:
+        p.error("nothing to write: give -o, --hist-out and/or --per-read")
     if args.fpr is None and args.pval is None:
         args.pval = 0.02
     return args
@@ -144,7 +146,7 @@ def main():
     print(f"Scale:     k-mer {'mean and SD' if args.scale == 'sd' else 'median and 1.4826 x MAD'}")
     print(f"Threshold: {how}  ->  {statistic} > {cutoff:.4f}"
           + (f", Fisher lag {args.fisher_lag}" if args.fisher_lag else ""))
-    print(f"Output:    {args.output or '(histogram only)'}")
+    print(f"Output:    {args.output or '(no per-position table)'}")
     print()
 
     for path in (args.bam, args.model):
@@ -170,7 +172,7 @@ def main():
     need_p = bool(args.fisher_lag or args.per_read)
     strand_char = "-" if args.strand == "rev" else "+"
     written = 0
-    n_obs = n_scored = n_called = 0
+    n_obs = n_scored = n_called = n_in_model = 0
     hist = np.zeros(HIST_BINS + 1, dtype=np.int64)
 
     out = open_out(args.output) if args.output else None
@@ -196,10 +198,13 @@ def main():
     acc = PositionAccumulator(emit)
     per_read = open_out(args.per_read) if args.per_read else None
     if per_read:
-        per_read.write("read_id\tchr\tpos\tstrand\tlevel\tz\tp\n")
+        per_read.write("read_id\tchr\tpos\tstrand\tlevel\tz\tp\tcalled\n")
 
     for read in source:
         n_obs += read.pos.size
+        # K-mers the model lists at all, whatever their count - tells "the model does
+        # not cover this sequence" apart from "it covers it too thinly" below.
+        n_in_model += int(np.isin(read.kmer, m_kmer).sum())
         z = z_scores(read.kmer, read.level, m_kmer, m_n, m_mean, m_sd,
                      args.min_kmer_obs)
         ok = ~np.isnan(z)
@@ -224,7 +229,7 @@ def main():
             for j in range(pos.size):
                 per_read.write(f"{read.read_id}\t{read.ref}\t{int(pos[j]) + 1}"
                                f"\t{strand_char}\t{level[j]:.4f}\t{z[j]:.4f}"
-                               f"\t{p[j]:.4g}\n")
+                               f"\t{p[j]:.4g}\t{int(called[j])}\n")
     acc.close()
     if per_read:
         per_read.close()
@@ -247,10 +252,18 @@ def main():
         # kmer_signal_model.py. Nothing can be scored, and that is the right answer.
         print("Warning: the model is empty (its control has no reads on this "
               "reference); no positions were scored.")
+    elif n_obs > 0 and n_scored == 0 and n_in_model == 0:
+        # None of this sample's k-mers appear in the model. That is a mismatch - the
+        # wrong reference, strand set or backend - not thin data.
+        sys.exit("Error: observations were read but none of their k-mers are in the "
+                 "model at all. Check that the model was built on the same reference.")
     elif n_obs > 0 and n_scored == 0:
-        sys.exit("Error: observations were read but none could be scored - no k-mer "
-                 "in this sample is in the model with enough observations. Check that "
-                 "the model was built on the same reference, and --min-kmer-obs.")
+        # The k-mers are in the model, but none with --min-kmer-obs observations: the
+        # control has only a handful of reads on this strand (js4031: 2 reads of a
+        # B-DNA library on the PolyT reference, at --min-kmer-obs 100). Nothing can be
+        # scored, and an empty result is the right answer, not a failed job.
+        print(f"Warning: the model has this sample's k-mers but none with at least "
+              f"{args.min_kmer_obs} observations; no positions were scored.")
     print("Done.")
 
 

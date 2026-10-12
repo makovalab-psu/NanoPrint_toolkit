@@ -2245,3 +2245,87 @@ then makes everything downstream of them look stale. With `--rerun-triggers mtim
 same dry run schedules only `sweep_*` rules (17,786 jobs for the 144-set example table).
 Pass it to the sweep and to the next main-workflow run on any project whose filtered BAMs
 predate this change. Both `mod_sweep.smk` usage lines should be read as including it.
+
+### Phase 2d: per-read, per-nucleotide tables, behind `^per-read` (js4031, 2026-10-08)
+
+The single-molecule, single-nucleotide view is central to this project but one row per
+aligned base per read is impractical at genome scale (js4022 would be ~9.5e9 rows per
+sample strand), so these tables are **off by default** and built only when CONFIG asks:
+
+```
+^per-read	uncalled4     data/perread_signal/uncalled4/{genome}/{raw_sample}_{strand}.tsv.gz
+^per-read	remora        data/perread_signal/remora/{genome}/{raw_sample}_{strand}.tsv.gz
+^per-read	mod-calls     data/perread_mod/{backend}/{genome}/{thr}/{raw_sample}_vs_{model}_{strand}.tsv.gz
+```
+
+- **Signal tables** (`perread_signal.py`, rule `perread_signal`): `read_id chr pos strand
+  nt kmer level level_sd dwell`, plus `model_diff` for uncalled4. Rows are in reference
+  order within a read on either strand.
+- **Call tables** (`perbase_mod_calls.py --per-read`, rule `perread_mod_calls`):
+  `read_id chr pos strand level z p called`. `called` is new and is the call at that
+  run's threshold, which is why `{thr}` is in the path. One table per `^mod-calls`
+  backend x threshold x control model, for treated and control.
+- All three share `read_id`, `chr`, `pos`, `strand`, so a molecule can be followed from
+  either backend's signal to its calls.
+
+**The uncalled4 table does not come from `uncalled4 convert`.** That TSV's index columns
+are `seq.name, seq.pos, seq.strand, aln.id`, and `aln.id` is a running number per file,
+not the read name, so it cannot be joined to the Remora or call tables - which defeats
+the point. (`aln.read_id` exists as a layer in the uncalled4 source, but whether
+`--tsv-cols` accepts it is untested, and `dtw.base` looked just as valid and was not.)
+The table is written from the BAM's DTW tags by the same decoder the mod calling uses,
+with `sam.query_name`. `uncalled4_convert_tsv` is unchanged and can still be requested
+by name.
+
+**Design notes.**
+- `perread_mod_calls` is a separate rule that re-scores the sample, not an extra output
+  of `perbase_mod_calls`: a rule's outputs cannot depend on a CONFIG flag without
+  defining the rule twice, and a per-read file written as an untracked side effect (the
+  old `mod_per_read` config key, now removed) is not rebuilt when the flag is turned on
+  after the per-position files exist. The cost is scoring twice, only when asked.
+- `CONFIG.sh` rejects `^per-read mod-calls` without a `^mod-calls` line, and
+  `^per-read remora` without `^remora-levels`.
+- The extra uncalled4 columns (`dtw.current_sd`, `dtw.length`, `dtw.model_diff`) are read
+  defensively: if an attribute is missing or the wrong length the column is `NA` and the
+  log counts `reads without <attr>`, rather than the table failing. `dtw.current`,
+  `seq.kmer` and `seq.pos` are proven on real data; the three extras are not.
+- Removing the `per_read` param changed `perbase_mod_calls`' code, so the main workflow
+  will want to rebuild existing calls unless run with `--rerun-triggers mtime`.
+
+**Tested / not tested.** `test_mod_calling.py` writes signal tables for both strands
+through the stand-in source and checks row count, reference order, strand, reference
+base, k-mer, NA handling and that every signal row has a matching call row; and that
+`--per-read` alone gives the same table as with `-o`. Six CONFIG variants dry-run as
+intended (off by default; all three on = 8 `perread_signal` + 8 `perread_mod_calls` for
+one relationship; the three rejected cases exit with their messages). **Not run on real
+data.** First run, check `reads without current_sd / length / model_diff` is absent
+from the uncalled4 log.
+
+### New workflow defaults from the js4031 sweep; `^filter-mapq` (2026-10-09)
+
+Jacob chose `uncalled4_q0_fisher1_fpr02` and `remora_q0_fisher1_fpr02` from the 144-set
+sweep, and those settings are now what the workflow does with no overrides:
+
+| Setting | Was | Now | Where |
+|---|---|---|---|
+| Alignment filter | MAPQ >= 20 | MAPQ >= 0 | `^filter-mapq` in CONFIG (`FILTER_MAPQ`), or `--config filter_mapq=` |
+| Calling threshold | p < 0.02 | fpr 0.02 | `--config mod_fpr=` (`mod_pval=` adds a p threshold) |
+| Fisher window | 0 | 1 | `--config mod_fisher_lag=` |
+
+Unchanged: mean/SD scale, 15-MAD outlier filter, k-1 error-mask flank, 20,000
+observations per k-mer, 30 minimum. **The scripts' own defaults are unchanged**
+(`perbase_mod_calls.py` alone still means p < 0.02, no smoothing) - an fpr threshold
+needs a null histogram a bare script call does not have. The workflow passes its
+settings explicitly.
+
+**MAPQ 0 is a model-oligo result.** Secondary alignments were 0.04% of mapped reads
+there. On a genome MAPQ 0 is multimapping, so whole-genome projects should set
+`^filter-mapq 10` or `20`; that is why it is a CONFIG line and not only a `--config` key.
+`bin/nanoprint preprocess` still filters at MAPQ 20 and was not touched.
+
+Fisher smoothing was scored on a 22-base homopolymer, the ideal case for averaging
+neighbours; a window of 1 costs about one base of resolution either side.
+
+Changing these defaults changes rule params, so an existing project re-run without
+`--rerun-triggers mtime` rebuilds from the filter down. For js4031 that is intended:
+`js4031_manuscript_CONFIG` regenerates everything.

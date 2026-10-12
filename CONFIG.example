@@ -74,19 +74,33 @@
 # reproducibility of the canonical signal.
 #^mod-pool	G4_0mM_pool	CTRL_rep1_uncalled4	CTRL_rep2_uncalled4	CTRL_js4001_uncalled4
 # Calling threshold, as --config keys (either or both; comma-separated lists allowed):
-#   mod_pval=0.02   p-value below this (the default)
-#   mod_fpr=0.02    the cutoff this fraction of the held-out control exceeds
+#   mod_fpr=0.02    the cutoff this fraction of the held-out control exceeds (the default)
+#   mod_pval=0.02   p-value below this (off by default; the published threshold)
 # Outputs are kept apart by threshold: data/mod_reactivity/<backend>/<genome>/p0.02/...
 # and .../fpr0.02/..., then matched/ or <pool name>/.
 # To compare many settings side by side (filter, model and test options), see
 # workflow/sweeps/mod_sweep.smk and its example table.
-# Other --config keys: mod_mad (15), mod_min_kmer_obs (30), mod_fisher_lag (0),
-# mod_max_obs_per_kmer (20000), mod_per_read (False).
+# Other --config keys: mod_mad (15), mod_min_kmer_obs (30), mod_fisher_lag (1),
+# mod_max_obs_per_kmer (20000).
+
+# Per-read, per-nucleotide tables (the single-molecule view). OFF unless asked for:
+# each is one row per aligned base per read, which is fine for model oligos,
+# plasmids and single loci and impractical for a genome. One line per table.
+#   uncalled4   signal of every read at every position, from the Uncalled4 BAM
+#   remora      the same through the Remora API (needs ^remora-levels and pod5)
+#   mod-calls   z, p and the call of every read at every position (needs ^mod-calls)
+# All three carry the read name, so a molecule can be followed across them.
+#^per-read	uncalled4
+#^per-read	remora
+#^per-read	mod-calls
 
 # Alignment filter: mapped primary alignments at or above a mapping quality
-# (unmapped, secondary and supplementary are always removed). Default 20; set with
-#   snakemake --config filter_mapq=0     # keep every mapped primary alignment
+# (unmapped, secondary and supplementary are always removed). Default 0 = every
+# mapped primary alignment: on model oligos the old MAPQ >= 20 filter removed most
+# permanganate-modified reads. For WHOLE-GENOME data set it to 10 or 20 - there a
+# MAPQ of 0 means the read fits two or more places equally well (repeats).
 # It applies to all samples and reruns everything downstream of the filter.
+#^filter-mapq	20
 
 # Pod5 / signal analysis settings
 # Uncomment and set when using pod5 raw data as input instead of FASTQ/BAM.
