@@ -167,8 +167,11 @@ fi
 echo "Filtering bedGraph..."
 # Filter out header and values below threshold
 if [[ "$SIG_LEVEL" -eq 0 ]]; then
-    # No filtering - just remove header
-    grep -v "^#" "$INPUT" | grep -v "^$" > "$FILTERED_BG"
+    # No filtering - just remove header. '|| true': with no data lines grep exits 1
+    # and pipefail ends the script here, before the empty check below can write
+    # the placeholder (js4037: a low-depth pair with no position over the
+    # reactivity coverage cutoff).
+    grep -v "^#" "$INPUT" | grep -v "^$" > "$FILTERED_BG" || true
 else
     # Filter by threshold
     awk -v thresh="$THRESHOLD" '
