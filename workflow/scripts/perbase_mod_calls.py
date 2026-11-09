@@ -48,12 +48,22 @@ called modified at this run's threshold). Large - one row per aligned base per r
 so it is meant for model oligos, plasmids and single loci. With --per-read, -o may be
 omitted.
 
+--read-summary writes one row per read instead - small enough for a genome:
+    read_id  chr  strand  start  end  qs  n_scored  n_called  n_T  n_T_called  mean_absz
+(start/end: 1-based span of the scored positions; qs: the read's 'qs' tag, NA if
+none; n_T: scored positions whose base on this strand is T - an A in the forward
+reference on 'rev'). For asking whether modifications are concentrated in some
+molecules rather than spread evenly (js4037: permanganate reaching some cells and
+not others). Reads with no scored position are left out. With --read-summary, -o
+may be omitted.
+
 Usage:
     perbase_mod_calls.py --backend uncalled4 -i <uncalled4.bam> -g <genome.fa> \
         -m <model.tsv> -s <for|rev> -o <output.txt.gz> [--half B] [--pval 0.02]
     perbase_mod_calls.py ... --half B --hist-out <control_for.hist.tsv>
     perbase_mod_calls.py ... --fpr 0.02 --null-hist <control_for.hist.tsv> \
         <control_rev.hist.tsv> -o <output.txt.gz>
+    perbase_mod_calls.py ... --fpr 0.02 --null-hist ... --read-summary <reads.tsv.gz>
 """
 
 import os
@@ -101,6 +111,9 @@ def parse_args():
                         "by Fisher's method before calling (default: 0 = off; Tombo's "
                         "default is 1)")
     p.add_argument("--per-read", help="Write the per-read table here (.tsv.gz)")
+    p.add_argument("--read-summary",
+                   help="Write one row per read (counts of scored and called "
+                        "positions) here (.tsv.gz)")
     p.add_argument("-c", "--min-cov", type=int, default=1,
                    help="Minimum coverage to emit a position (default: 1)")
     args = p.parse_args()
@@ -110,8 +123,8 @@ def parse_args():
         p.error("--fpr needs --null-hist (histograms of the held-out control)")
     if args.null_hist and args.fpr is None:
         p.error("--null-hist is only used with --fpr")
-    if not args.output and not args.hist_out and not args.per_read:
-        p.error("nothing to write: give -o, --hist-out and/or --per-read")
+    if not (args.output or args.hist_out or args.per_read or args.read_summary):
+        p.error("nothing to write: give -o, --hist-out, --per-read and/or --read-summary")
     if args.fpr is None and args.pval is None:
         args.pval = 0.02
     return args
@@ -152,7 +165,7 @@ def main():
     for path in (args.bam, args.model):
         if not os.path.exists(path):
             sys.exit(f"Error: input not found: {path}")
-    for path in (args.output, args.hist_out, args.per_read):
+    for path in (args.output, args.hist_out, args.per_read, args.read_summary):
         if path:
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 
@@ -199,6 +212,12 @@ def main():
     per_read = open_out(args.per_read) if args.per_read else None
     if per_read:
         per_read.write("read_id\tchr\tpos\tstrand\tlevel\tz\tp\tcalled\n")
+    read_summary = open_out(args.read_summary) if args.read_summary else None
+    if read_summary:
+        read_summary.write("read_id\tchr\tstrand\tstart\tend\tqs\tn_scored\tn_called"
+                           "\tn_T\tn_T_called\tmean_absz\n")
+    # Reference positions are forward-strand bases; a T read on 'rev' sits on an A.
+    t_code = 0 if args.strand == "rev" else 3
 
     for read in source:
         n_obs += read.pos.size
@@ -230,9 +249,20 @@ def main():
                 per_read.write(f"{read.read_id}\t{read.ref}\t{int(pos[j]) + 1}"
                                f"\t{strand_char}\t{level[j]:.4f}\t{z[j]:.4f}"
                                f"\t{p[j]:.4g}\t{int(called[j])}\n")
+        if read_summary and pos.size:
+            _, codes = source.refs.get(read.ref)
+            is_t = codes[np.clip(pos, 0, codes.size - 1)] == t_code
+            qs = "NA" if math.isnan(read.qs) else f"{read.qs:.2f}"
+            read_summary.write(
+                f"{read.read_id}\t{read.ref}\t{strand_char}\t{int(pos.min()) + 1}"
+                f"\t{int(pos.max()) + 1}\t{qs}\t{pos.size}\t{int(called.sum())}"
+                f"\t{int(is_t.sum())}\t{int(called[is_t].sum())}"
+                f"\t{float(np.abs(z).mean()):.4f}\n")
     acc.close()
     if per_read:
         per_read.close()
+    if read_summary:
+        read_summary.close()
     if out:
         out.close()
     if args.hist_out:

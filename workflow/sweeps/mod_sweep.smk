@@ -39,11 +39,43 @@
 #   filter_mapq=<N>               the MAPQ the MAIN workflow was run with, if it was
 #                                 given by --config and not by ^filter-mapq;
 #                                 sets of that MAPQ reuse its Uncalled4 BAMs
+#   sweep_min_cov=<N>             coverage both samples need for a position to enter
+#                                 the per-position summary columns (default:
+#                                 reactivity_cov_threshold, 10). The pooled columns
+#                                 use every position both samples scored.
+#   sweep_position_rows=auto|all|none
+#                                 rows of positions.tsv.gz (default auto: all for
+#                                 model oligos, none once a call file has more than
+#                                 200,000 positions - a genome)
+#   sweep_regions=<bed>           positions.tsv.gz only inside these intervals, and
+#                                 an extra scope=regions summary row per contig.
+#                                 With sweep_position_rows=none: the summary rows
+#                                 only, for sites too thinly covered to read singly
+#   sweep_table_threads=<N>       processes for the table (default 8; ~1.5 GB each
+#                                 on a 4.2 Mb genome)
+#   sweep_read_summary_sets=a,b   also score these sets one row per read
+#                                 (perbase_mod_calls.py --read-summary) and compare
+#                                 treated with control per read: are the calls
+#                                 concentrated in some molecules? Off by default.
+#   sweep_read_min_scored=<N>     reads with fewer scored positions are left out of
+#                                 that comparison (default 1000)
+#
+# Genomes. A ^u sample (already Uncalled4-aligned) has no pre-filter reads, so a set
+# BELOW the main workflow's MAPQ cannot include it. A set ABOVE it can: the supplied
+# BAM is filtered to the higher MAPQ (sweep_subset_uncalled4) - the DTW of a read
+# does not depend on which other reads were aligned with it. The model cap (max_obs)
+# matters on a genome: all 262,144 9-mers are present, so use ~1000, not the 20,000
+# chosen on oligos (js4033).
 #
 # Outputs:
 #   sweep/tables/<name>/positions.tsv.gz   one row per set x relationship x position
+#                                          (see sweep_position_rows, sweep_regions)
 #   sweep/tables/<name>/summary.tsv        one row per set x relationship x contig
+#                                          (x scope, with sweep_regions)
 #   sweep/tables/<name>/manifest.tsv       which files each row came from
+#   sweep/tables/<name>/reads_summary.tsv  with sweep_read_summary_sets: per-read
+#   sweep/tables/<name>/reads_hist.tsv     call rates, treated vs control
+#   sweep/tables/<name>/reads_manifest.tsv (read_summary_table.py)
 #
 # Intermediate files are keyed by their parameters, so sets that share a filter or
 # a model share the files, and a second sweep reuses whatever the first one built.
@@ -147,11 +179,37 @@ def sweep_call_files(wildcards):
     return sorted(set(files))
 
 
+SWEEP_READ_SETS = _config_list("sweep_read_summary_sets") or []
+_unknown_read_sets = sorted(set(SWEEP_READ_SETS) - {row["set"] for row in SWEEP_SETS})
+if _unknown_read_sets:
+    raise ValueError(f"sweep_read_summary_sets: not in {SWEEP_TABLE}: "
+                     f"{', '.join(_unknown_read_sets)}")
+
+
+def read_summary_file(call_file):
+    """The --read-summary file scored alongside a perbase_mod call file."""
+    return ("sweep/read_summary/" + call_file[len("sweep/perbase_mod/"):]
+            ).replace(".txt.gz", ".reads.tsv.gz")
+
+
+def sweep_read_units():
+    return [unit for unit in sweep_units() if unit["set"] in SWEEP_READ_SETS]
+
+
+def sweep_read_files(wildcards):
+    files = []
+    for unit in sweep_read_units():
+        files += [read_summary_file(unit["treatment_file"]),
+                  read_summary_file(unit["control_file"])]
+    return sorted(set(files))
+
+
 # Defined before the main Snakefile is included so that it is the default target.
 rule sweep_all:
     input:
         f"sweep/tables/{SWEEP_NAME}/summary.tsv",
-        f"sweep/tables/{SWEEP_NAME}/positions.tsv.gz"
+        f"sweep/tables/{SWEEP_NAME}/positions.tsv.gz",
+        [f"sweep/tables/{SWEEP_NAME}/reads_summary.tsv"] if SWEEP_READ_SETS else []
 
 
 # The main workflow: sample names, relationships, pod5 paths, pools, and the
@@ -173,10 +231,12 @@ def sweep_sample_bam(raw_sample, genome, mapq):
     if int(mapq) == MAIN_FILTER_MAPQ:
         return supplied or f"data/uncalled4/{genome}/{raw_sample}.bam"
     if supplied:
-        raise ValueError(
-            f"{raw_sample} was supplied already Uncalled4-aligned (^u), so its "
-            f"pre-filter reads do not exist and it cannot be re-filtered at MAPQ {mapq}. "
-            f"Only mapq={MAIN_FILTER_MAPQ} sets can include it.")
+        if int(mapq) < MAIN_FILTER_MAPQ:
+            raise ValueError(
+                f"{raw_sample} was supplied already Uncalled4-aligned (^u) at MAPQ >= "
+                f"{MAIN_FILTER_MAPQ}, so its lower-MAPQ reads do not exist and it cannot "
+                f"be in a mapq={mapq} set. Sets at mapq >= {MAIN_FILTER_MAPQ} can include it.")
+        return f"sweep/uncalled4_subset/mapq{mapq}/{genome}/{raw_sample}.bam"
     return f"sweep/uncalled4/mapq{mapq}/{genome}/{raw_sample}.bam"
 
 
@@ -257,6 +317,32 @@ rule sweep_uncalled4_align:
             -p {input.pod5} \
             -g {input.genome} \
             -o {output.bam} \
+            -t {threads} \
+            2>&1 | tee {log}
+        """
+
+
+rule sweep_subset_uncalled4:
+    """Raise the MAPQ floor of a supplied (^u) Uncalled4 BAM; DTW tags are kept."""
+    input:
+        bam=lambda wildcards: get_uncalled4_bam(wildcards.raw_sample),
+        bai=lambda wildcards: get_uncalled4_bam(wildcards.raw_sample) + ".bai"
+    output:
+        bam="sweep/uncalled4_subset/mapq{mapq}/{genome}/{raw_sample}.bam",
+        bai="sweep/uncalled4_subset/mapq{mapq}/{genome}/{raw_sample}.bam.bai"
+    log:
+        "logs/sweep/subset_uncalled4/mapq{mapq}/{genome}/{raw_sample}.log"
+    benchmark:
+        "benchmarks/sweep/subset_uncalled4/mapq{mapq}/{genome}/{raw_sample}.tsv"
+    wildcard_constraints:
+        raw_sample="|".join(re.escape(rs) for rs in UNCALLED4_PATHS) or "NONE"
+    threads: 4
+    shell:
+        """
+        workflow/scripts/Subset_uncalled4_mapq.sh \
+            -i {input.bam} \
+            -o {output.bam} \
+            -q {wildcards.mapq} \
             -t {threads} \
             2>&1 | tee {log}
         """
@@ -386,15 +472,19 @@ rule sweep_table:
     """Tabulate every parameter set: per position, and summarised per contig."""
     input:
         calls=sweep_call_files,
-        table=SWEEP_TABLE
+        table=SWEEP_TABLE,
+        regions=config.get("sweep_regions") or []
     output:
         manifest="sweep/tables/{name}/manifest.tsv",
         positions="sweep/tables/{name}/positions.tsv.gz",
         summary="sweep/tables/{name}/summary.tsv"
     params:
-        cov=config.get("reactivity_cov_threshold", 10)
+        cov=config.get("sweep_min_cov", config.get("reactivity_cov_threshold", 10)),
+        rows=config.get("sweep_position_rows", "auto"),
+        regions=lambda wildcards, input: f"--regions {input.regions}" if input.regions else ""
     log:
         "logs/sweep/tables/{name}.log"
+    threads: int(config.get("sweep_table_threads", 8))
     run:
         units = sweep_units()
         columns = SWEEP_COLUMNS + ["genome", "relationship", "model_set", "model",
@@ -406,4 +496,77 @@ rule sweep_table:
         shell(
             "python3 workflow/scripts/mod_sweep_table.py "
             "-m {output.manifest} -p {output.positions} -s {output.summary} "
-            "-c {params.cov} 2>&1 | tee {log}")
+            "-c {params.cov} -t {threads} --position-rows {params.rows} {params.regions} "
+            "2>&1 | tee {log}")
+
+
+# Per-read call rates (sweep_read_summary_sets). A separate scoring pass, not an
+# extra output of sweep_perbase_mod_calls: adding an output there would rerun every
+# set of a finished sweep. Same inputs and options, so the calls are the same.
+rule sweep_read_summary:
+    """One row per read of one sample strand under one parameter set."""
+    input:
+        unpack(lambda wildcards: sweep_inputs([wildcards.raw_sample], wildcards)),
+        model=SWEEP_MODEL_DIR + "/{model}.tsv",
+        null=sweep_null_hists
+    output:
+        reads="sweep/read_summary/" + SWEEP_CALL_DIR + "/{raw_sample}_vs_{model}_{strand}.reads.tsv.gz"
+    params:
+        backend_args=mod_backend_args,
+        threshold_args=mod_threshold_args,
+        half=mod_half
+    log:
+        "logs/sweep/read_summary/" + SWEEP_CALL_DIR + "/{raw_sample}_vs_{model}_{strand}.log"
+    benchmark:
+        "benchmarks/sweep/read_summary/" + SWEEP_CALL_DIR + "/{raw_sample}_vs_{model}_{strand}.tsv"
+    wildcard_constraints:
+        backend="uncalled4|remora",
+        strand="for|rev",
+        thr=MOD_THR_CONSTRAINT,
+        raw_sample=MOD_SAMPLE_CONSTRAINT,
+        model=MOD_MODEL_CONSTRAINT
+    shell:
+        """
+        python3 workflow/scripts/perbase_mod_calls.py \
+            --backend {wildcards.backend} \
+            -i {input.bam} \
+            -g {input.genome} \
+            {params.backend_args} \
+            -m {input.model} \
+            -s {wildcards.strand} \
+            --half {params.half} \
+            {params.threshold_args} \
+            --scale {wildcards.scale} \
+            --min-kmer-obs {wildcards.min_obs} \
+            --fisher-lag {wildcards.lag} \
+            --read-summary {output.reads} \
+            2>&1 | tee {log}
+        """
+
+
+rule sweep_read_table:
+    """Per-read call rates of every sweep_read_summary_sets set, treated vs control."""
+    input:
+        reads=sweep_read_files,
+        table=SWEEP_TABLE
+    output:
+        manifest="sweep/tables/{name}/reads_manifest.tsv",
+        summary="sweep/tables/{name}/reads_summary.tsv",
+        hist="sweep/tables/{name}/reads_hist.tsv"
+    params:
+        min_scored=config.get("sweep_read_min_scored", 1000)
+    log:
+        "logs/sweep/tables/{name}_reads.log"
+    run:
+        columns = SWEEP_COLUMNS + ["genome", "relationship", "model_set", "model", "strand"]
+        with open(output.manifest, "w") as fh:
+            fh.write("\t".join(columns + ["treatment_reads", "control_reads"]) + "\n")
+            for unit in sweep_read_units():
+                fh.write("\t".join([str(unit[c]) for c in columns]
+                                   + [read_summary_file(unit["treatment_file"]),
+                                      read_summary_file(unit["control_file"])]) + "\n")
+        shell(
+            "python3 workflow/scripts/read_summary_table.py "
+            "-m {output.manifest} -s {output.summary} --hist {output.hist} "
+            "--min-scored {params.min_scored} "
+            "2>&1 | tee {log}")

@@ -2349,3 +2349,42 @@ neighbours; a window of 1 costs about one base of resolution either side.
 Changing these defaults changes rule params, so an existing project re-run without
 `--rerun-triggers mtime` rebuilds from the filter down. For js4031 that is intended:
 `js4031_manuscript_CONFIG` regenerates everything.
+
+### K-mer model compaction re-sorted the buffer after every read (js4037, 2026-11-05)
+
+`KmerModelBuilder` compacts its buffer to the `max_obs` lowest-priority observations
+per k-mer once 20 M observations are buffered, then reset `buffered` to what survived.
+When the cap rarely binds - a genome at low depth, where 262,144 9-mers x 1000 is far
+more than was seen - nearly everything survives, `buffered` stays above 20 M, and the
+next `add()` (one read) triggered another full `lexsort` of 20 M+ values. js4037: both
+matched control models (~14 M observations) finished, and both `Bsub_0mM_pool` models
+(~22 M) sat at 100% CPU for 4.5 h+, uncalled4 included.
+
+Fix: after a compaction the next one waits until the buffer has doubled
+(`compact_at = max(COMPACT_AT, 2 x kept)`), so the cost is amortised O(n log n). The
+kept sample is the lowest-priority `max_obs` per k-mer whenever compaction happens, so
+the model is unchanged: byte-identical to the old builder on synthetic streams with the
+cap binding hard, lightly and not at all; 6.6 s -> 0.14 s on the not-binding case.
+
+### Per-read call rates: `--read-summary` and `sweep_read_summary_sets` (js4037, 2026-11-09)
+
+The per-position tables pool reads, so 3% reactivity cannot be told apart from 10% of
+molecules at 30%. In vivo permanganate is expected to be the second kind - it reaches
+cells with damaged envelopes and not intact ones - which would dilute the T signal
+and any footprint. `perbase_mod_calls.py --read-summary` writes one row per read
+(`n_scored`, `n_called`, `n_T`, `n_T_called`, `mean_absz`, span, `qs`), a few MB per
+sample where `--per-read` would be ~1 GB on a genome. `ReadLevels` now carries the
+read's `qs` tag for it (NaN if absent).
+
+In the sweep it is opt-in: `--config sweep_read_summary_sets=a,b` adds
+`sweep_read_summary` (a second scoring pass with the same inputs and options as
+`sweep_perbase_mod_calls`; an extra output on that rule would have rerun every set of
+a finished sweep) and `sweep_read_table` -> `read_summary_table.py`, which judges
+each treated read against the control's own rate distribution within qs bins (the
+control's false calls are not binomial: worse reads make more) and reports the
+reactive fraction, the share of calls in reactive reads, a dispersion ratio, and T vs
+non-T call rates inside and outside the reactive tail. Use a Fisher-lag-0 set for
+it: lag 1 copies one modified base into its neighbours' calls and inflates the
+per-read spread. Tested on a stub source (counts, the T/A switch on 'rev', qs NA) and
+on simulated reads (a 10%-hit sample comes back at 11.7% reactive = 10% + the 1% tail,
+T-biased; an unhit one at ~0 excess); not yet run on real data.

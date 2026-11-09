@@ -26,9 +26,12 @@ have at least --min-cov reads:
     frac_treated_mean
     reactivity_mean, reactivity_max, pos_of_max, nt_of_max
     reactivity_mean_T, reactivity_mean_nonT, n_T
-                          split by the reference base. Permanganate reacts mainly
-                          with T, but one modified T shifts the current at its
-                          neighbours too, so non-T is not a clean negative.
+                          split by the base on the read's strand: T on 'for', and
+                          on 'rev' an A in the nt column (nt is always the forward
+                          reference base, so a T on the reverse strand reads A).
+                          Permanganate reacts mainly with T, but one modified T
+                          shifts the current at its neighbours too, so non-T is
+                          not a clean negative.
     reactivity_sd         spread of reactivity across positions
     n_reactive            positions with reactivity > 3 x background
   Then, pooled over every position both samples scored, whatever its coverage
@@ -59,8 +62,11 @@ Rows of the positions table:
                           AUTO_MAX_POSITIONS positions - a genome would give one row
                           per position per manifest row, billions of rows - then none
   --regions BED           only positions inside these intervals (BED: 0-based start,
-                          end exclusive; extra columns ignored). Overrides
-                          --position-rows, and adds the scope=regions summary rows.
+                          end exclusive; extra columns ignored), and adds the
+                          scope=regions summary rows. Overrides auto and all;
+                          with --position-rows none the regions get their summary
+                          rows but no position rows (sites too thinly covered to
+                          read one by one).
 
 Each manifest row is independent, so they are spread over --threads processes. A
 call file is held as numpy arrays (~40 bytes per position), and each process keeps
@@ -324,11 +330,15 @@ def process_unit(args):
         pos, has_t, has_c, ta, ca = join(treated.contigs.get(contig),
                                           control.contigs.get(contig))
         nt = np.where(has_t, ta["nt"], ca["nt"])
-        is_t = nt == b"T"
+        # nt is the forward reference base on both strands; a T on the reverse
+        # strand is an A there (js4037: testing for T on 'rev' swapped the split).
+        is_t = nt == (b"A" if unit.get("strand") == "rev" else b"T")
         shared = has_t & has_c
         enough = shared & (ta["cov"] >= min_cov) & (ca["cov"] >= min_cov)
 
-        if regions is not None:
+        if rows_mode == "none":
+            write = np.zeros(pos.size, dtype=bool)
+        elif regions is not None:
             write = in_regions(contig, pos, regions)
         else:
             write = np.full(pos.size, rows_mode == "all")
@@ -370,7 +380,9 @@ def main():
 
     regions = read_regions(args.regions) if args.regions else None
     rows_mode = args.position_rows
-    if regions is not None:
+    if rows_mode == "none":
+        print("Position rows:      none")
+    elif regions is not None:
         print(f"Position rows:      inside {sum(s.size for s, _ in regions.values())} "
               f"intervals of {args.regions}")
     elif rows_mode == "auto":

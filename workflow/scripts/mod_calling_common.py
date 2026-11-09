@@ -187,10 +187,13 @@ class ReadLevels:
     """One read's observations. pos is 0-based reference coordinates; kmer is -1
     where the context holds a non-ACGT base; clean is all False unless requested.
     extra, when the source was opened with want_extra, maps a name to one more
-    per-position array (level SD, dwell, ...) for the per-read signal table."""
-    __slots__ = ("ref", "start", "read_id", "pos", "level", "kmer", "clean", "extra")
+    per-position array (level SD, dwell, ...) for the per-read signal table.
+    qs is the read's mean basecall quality (the 'qs' tag), NaN if it has none."""
+    __slots__ = ("ref", "start", "read_id", "pos", "level", "kmer", "clean", "extra",
+                 "qs")
 
-    def __init__(self, ref, start, read_id, pos, level, kmer, clean, extra=None):
+    def __init__(self, ref, start, read_id, pos, level, kmer, clean, extra=None,
+                 qs=math.nan):
         self.ref = ref
         self.start = start
         self.read_id = read_id
@@ -199,6 +202,15 @@ class ReadLevels:
         self.kmer = kmer
         self.clean = clean
         self.extra = extra
+        self.qs = qs
+
+
+def read_qs(sam):
+    """Mean basecall quality from the 'qs' tag; NaN when the basecaller wrote none."""
+    try:
+        return float(sam.get_tag("qs")) if sam.has_tag("qs") else math.nan
+    except (AttributeError, TypeError, ValueError):
+        return math.nan
 
 
 # ---------------------------------------------------------------------------
@@ -334,7 +346,8 @@ class Uncalled4Levels(_Source):
             pos, level, kmer = pos[keep], level[keep], kmer[keep]
             self.counts["reads used"] += 1
             yield ReadLevels(sam.reference_name, sam.reference_start, sam.query_name,
-                             pos, level, kmer, self.clean_for(sam, pos), extra)
+                             pos, level, kmer, self.clean_for(sam, pos), extra,
+                             read_qs(sam))
 
     def _extra(self, dtw, attr, size):
         """One more per-position DTW array, or NaN if this uncalled4 does not expose
@@ -477,7 +490,8 @@ class RemoraLevels(_Source):
                 extra = {name: values[keep] for name, values in extra.items()}
             self.counts["reads used"] += 1
             yield ReadLevels(sam.reference_name, sam.reference_start, sam.query_name,
-                             pos, level, kmer, self.clean_for(sam, pos), extra)
+                             pos, level, kmer, self.clean_for(sam, pos), extra,
+                             read_qs(sam))
 
     def __iter__(self):
         import pysam
@@ -620,6 +634,7 @@ class KmerModelBuilder:
         self.parts = []
         self.buffered = 0
         self.seen = 0
+        self.compact_at = self.COMPACT_AT
 
     def add(self, kmer, level):
         if kmer.size == 0:
@@ -628,8 +643,14 @@ class KmerModelBuilder:
         self.parts.append((kmer, level, prio))
         self.buffered += kmer.size
         self.seen += kmer.size
-        if self.max_obs and self.buffered >= self.COMPACT_AT:
+        if self.max_obs and self.buffered >= self.compact_at:
             self._compact()
+            # Wait for the buffer to double before the next compaction. When the cap
+            # rarely binds (a genome at low depth: 262,144 9-mers x max_obs is more
+            # than was seen) compaction keeps nearly everything, and a fixed trigger
+            # then re-sorted the whole buffer after every read (js4037: a pooled
+            # model at ~22 M observations ran for hours).
+            self.compact_at = max(self.COMPACT_AT, 2 * self.buffered)
 
     def _concat(self):
         kmer = np.concatenate([p[0] for p in self.parts])
